@@ -9,6 +9,7 @@ Progress marker: **v2 shim is usable for mode-0 and mode-1; next milestone is th
 - Universal preservation baseline drops TZ soft-fuse advancement and protects reserve-token zeroing paths without relying on persistent flashing of gbl-chainload itself.
 - Mode-1 supports the **stock recovery + custom system** use case by default.
 - Reserve token preservation is backed by static RE and user-provided locked/unlocked `oplusreserve1` diffs.
+- **patch11 locked-handoff (bootconfig lifecycle split) is implemented and device-validated (2026-10-08, OnePlus 15T / PLZ110_16.0.7.701-CN01 RAM-load):** ABL keeps its real unlocked state internally (patch10 permissive path intact) while outbound `androidboot.vbmeta.device_state` always reads `locked` and every `*verifiedbootstate` consumer answers `green`. On-device `getprop` confirms `vbmeta.device_state=locked`, `verifiedbootstate=green`, `flash.locked=1` with data intact and no warning screen — no userspace property modules needed for the `ro.boot.*` layer. Covers oplus and Xiaomi ABLs. Caveat: with the kernel seeing locked, custom *system* partitions (non-stock) would face strict userspace AVB — stock system + custom boot/recovery (grafted) is the validated configuration.
 
 ## Known limits
 

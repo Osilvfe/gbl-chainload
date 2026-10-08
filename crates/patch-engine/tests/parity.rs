@@ -268,6 +268,89 @@ fn patch10_applies_and_leaves_signature_words() {
     );
 }
 
+// --- patch11 — locked-handoff bootconfig ------------------------------
+
+const PATCH11_DEVSTATE_STR: &[u8] = b"androidboot.vbmeta.device_state";
+const PATCH11_CSEL_OFF: u32 = 0x2B970; // infiniti-EU-16.0.5.703 specific
+// CSEL x2, x10, x9, EQ — byte-identical across all five inspected
+// builds (infiniti 703/201, fairlady 201/701, pudding 44). Frozen.
+const PATCH11_CSEL_ORIG: u32 = 0x9A89_0142;
+// MOV x2, x10 (ORR x2, XZR, x10) — the forced "locked" operand.
+const PATCH11_CSEL_MOV: u32 = 0xAA0A_03E2;
+// Color table slots on the EU 703 fixture (16-byte-stride
+// {idx, ptr} tuples: green @+8, orange @+24, yellow @+40, red @+56).
+const PATCH11_TABLE_OFF: usize = 0x7B540;
+const PATCH11_GREEN_PTR: u64 = 0x66275;
+
+#[test]
+fn patch11_table_membership() {
+    let abl_table = patch_engine::abl_permissive::ABL_PERMISSIVE_PATCHES;
+    let p = abl_table
+        .iter()
+        .find(|p| p.name == "patch11-locked-handoff-bootconfig")
+        .expect("patch11 missing from abl_permissive table");
+    assert!(!p.mandatory, "patch11 must be optional (never blocks chainload)");
+}
+
+#[test]
+fn patch11_apply_rewrites_csel_and_color_table() {
+    let buf = match infiniti_pe() {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP: patch11 — fixture missing");
+            return;
+        }
+    };
+    let size = buf.len() as u32;
+    let mut work = buf.clone();
+
+    // Pre-patch frozen bytes.
+    assert_eq!(
+        read_instr_u32(&work, PATCH11_CSEL_OFF),
+        PATCH11_CSEL_ORIG,
+        "CSEL word drift — fixture or build layout changed"
+    );
+
+    use patch_engine::abl_permissive::locked_handoff;
+    assert_eq!(locked_handoff::apply(&mut work, size), PatchOutcome::Ok);
+
+    // 11a: CSEL → MOV x2, x10 ("locked" operand).
+    assert_eq!(read_instr_u32(&work, PATCH11_CSEL_OFF), PATCH11_CSEL_MOV);
+
+    // 11b: orange and yellow table slots repointed at green; green and
+    // red slots untouched.
+    let slot = |w: &[u8], o: usize| {
+        let mut v = 0u64;
+        for i in 0..8 {
+            v |= (w[o + i] as u64) << (8 * i);
+        }
+        v
+    };
+    assert_eq!(slot(&work, PATCH11_TABLE_OFF + 8), PATCH11_GREEN_PTR);
+    assert_eq!(slot(&work, PATCH11_TABLE_OFF + 24), PATCH11_GREEN_PTR);
+    assert_eq!(slot(&work, PATCH11_TABLE_OFF + 40), PATCH11_GREEN_PTR);
+    // Red slot still points at "red".
+    let red_ptr = slot(&work, PATCH11_TABLE_OFF + 56);
+    let red_off = red_ptr as usize;
+    assert_eq!(&work[red_off..red_off + 4], b"red\0");
+    // The anchor key string survives (patch must not eat its anchor).
+    let (r, _) = scan_for(&work, PATCH11_DEVSTATE_STR, None);
+    assert_eq!(r, ScanResult::Found);
+
+    // Idempotency: re-apply stays Ok and bytes stay put.
+    assert_eq!(locked_handoff::apply(&mut work, size), PatchOutcome::Ok);
+    assert_eq!(read_instr_u32(&work, PATCH11_CSEL_OFF), PATCH11_CSEL_MOV);
+    assert_eq!(slot(&work, PATCH11_TABLE_OFF + 24), PATCH11_GREEN_PTR);
+}
+
+#[test]
+fn patch11_clean_miss_without_anchor() {
+    let mut work = vec![0u8; 4096];
+    let size = work.len() as u32;
+    use patch_engine::abl_permissive::locked_handoff;
+    assert_eq!(locked_handoff::apply(&mut work, size), PatchOutcome::Miss);
+}
+
 // --- Engine-level integration tests -----------------------------------
 
 #[test]
@@ -282,10 +365,10 @@ fn engine_scoped_oplus_applies_all_three() {
     let mut work = buf.clone();
     let engine = Engine::ensure_init_scoped(Oem::Oplus, true);
     let r = engine.apply(&mut work);
-    // patch7 (1) + patch10 (1) + patch6 (1) = 3 applied.
+    // patch7 (1) + patch10 (1) + patch6 (1) + patch11 (1) = 4 applied.
     assert_eq!(
-        r.applied_count, 3,
-        "expected patch7 + patch10 + patch6 all OK on infiniti PE"
+        r.applied_count, 4,
+        "expected patch7 + patch10 + patch6 + patch11 all OK on infiniti PE"
     );
     assert_eq!(r.missed_count, 0);
     assert_eq!(r.worst, Worst::Ok);
@@ -303,8 +386,8 @@ fn engine_scoped_none_only_runs_abl_permissive() {
     let mut work = buf.clone();
     let engine = Engine::ensure_init_scoped(Oem::None, true);
     let r = engine.apply(&mut work);
-    // patch10 + patch6.
-    assert_eq!(r.applied_count, 2);
+    // patch10 + patch6 + patch11.
+    assert_eq!(r.applied_count, 3);
     assert_eq!(r.missed_count, 0);
     assert_eq!(r.worst, Worst::Ok);
 
@@ -326,7 +409,7 @@ fn engine_firmware_path_only_abl_permissive() {
     // Engine::ensure_init() is the firmware-mode entry point — must
     // contain exactly the abl_permissive set.
     let engine = Engine::ensure_init();
-    assert_eq!(engine.table().len(), 2);
+    assert_eq!(engine.table().len(), 3);
     for p in engine.table() {
         assert_eq!(p.scope, PatchScope::AblPermissive);
     }

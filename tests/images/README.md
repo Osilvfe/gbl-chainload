@@ -28,6 +28,7 @@ in PR2 Task 8).
 | `test_patch7` (orange-screen) | `LinuxLoader_infiniti.efi` only | offset-specific; needs the extracted infiniti PE |
 | `test_patch6` (lock-state fastboot-gate) | `*.efi` (any OnePlus/Oppo libavb PE) | string-anchored gate-bypass; needs extracted PEs |
 | `test_patch10` (libavb force-AVB-success) | `*.efi` (any Qcom libavb PE) | string-anchored function entry/exit rewrite; needs extracted PEs |
+| `097` patch11 locked-handoff gate | `*-abl.img` (all tracked ABLs, oplus + Xiaomi) | unwraps in-test; CSEL rewrite + color-table repoint + idempotency |
 | `042` mandatory anchor-uniqueness | `*.efi` only | strict |
 | `042` informational anchor-uniqueness | `*.bin`, `*.img` | non-fatal until extractor lands |
 | `060`/`061`/`062`/`064`/`067`/`069`/`081`/`083`/`084` | `pe/infiniti-EU-16.0.5.703.efi` | unwrapped stock infiniti PE |

@@ -198,7 +198,8 @@ mod tests {
     fn apply_via_ffi_round_trip() {
         // Build a CPatchResult, call EnsureInit + Apply on a tiny
         // buffer that won't match any anchors, and verify the FFI shim
-        // wrote the expected aggregate (2 patches, both mandatory MISS).
+        // wrote the expected aggregate (3 patches: patch10 + patch6
+        // mandatory MISS, patch11 optional MISS).
         let mut buf = vec![0u8; 4096];
         let mut r = CPatchResult {
             applied_count: 0,
@@ -209,9 +210,10 @@ mod tests {
         unsafe {
             DynamicPatch_Apply(buf.as_mut_ptr(), buf.len() as u32, &mut r);
         }
-        // abl_permissive = patch10 + patch6, both mandatory.
+        // abl_permissive = patch10 + patch6 (mandatory) + patch11
+        // (optional); all MISS on a zero buffer.
         assert_eq!(r.applied_count, 0);
-        assert_eq!(r.missed_count, 2);
+        assert_eq!(r.missed_count, 3);
         assert_eq!(r.worst_outcome, CPatchWorst::MandatoryMiss);
     }
 }

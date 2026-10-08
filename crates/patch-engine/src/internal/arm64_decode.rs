@@ -151,6 +151,27 @@ pub fn decode_adrp_add(buf: &[u8], adrp_off: u32) -> Option<u32> {
     Some(page_base + imm12)
 }
 
+/// Same as [`decode_adrp_add`], but also returns the destination
+/// register so callers can correlate the materialized pointer with a
+/// later use of that register (e.g. the operands of a CSEL).
+///
+/// Returns `(resolved_address, rd)`.
+pub fn decode_adrp_add_regs(buf: &[u8], adrp_off: u32) -> Option<(u32, u32)> {
+    let adrp_off_u = adrp_off as usize;
+    if adrp_off_u + 8 > buf.len() {
+        return None;
+    }
+    let adrp_insn = read_instr_u32(buf, adrp_off);
+    let add_insn = read_instr_u32(buf, adrp_off + 4);
+
+    let (page_base, adrp_rd) = decode_adrp(adrp_insn, adrp_off)?;
+    let (imm12, add_rn, add_rd) = decode_add_imm(add_insn)?;
+    if add_rn != adrp_rd || add_rd != adrp_rd {
+        return None;
+    }
+    Some((page_base + imm12, adrp_rd))
+}
+
 /// Walk every 4-byte-aligned offset in `buf` and count ADRP+ADD pairs
 /// whose decoded target equals `target_addr`. Optionally restricted to
 /// pairs whose ADRP location lies inside an executable PE section.
