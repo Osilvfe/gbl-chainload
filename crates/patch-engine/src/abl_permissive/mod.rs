@@ -1,7 +1,7 @@
 //! ABL-permissive patches — always compiled (firmware + host).
 //!
 //! Port of `GblChainloadPkg/Library/DynamicPatchLib/abl_permissive/`.
-//! Three patches:
+//! Four patches:
 //!
 //! - [`libavb_force_success`] — patch10. Forces libavb's
 //!   `avb_slot_verify` to always return OK with populated SlotData,
@@ -12,10 +12,15 @@
 //!   locked-handoff: ABL keeps its real unlocked state internally, but
 //!   outbound `androidboot.vbmeta.device_state` always says `locked`
 //!   and the verified-boot color table always answers `green`.
+//! - [`boot_failure_fallback`] — patch12 (optional). Keeps the A/B
+//!   retry counter and slot switching intact, but replaces the two
+//!   "cold-reset instead of fastboot" exits with a fall-through so a
+//!   device with no bootable slot can still reach fastboot.
 
 pub mod libavb_force_success;
 pub mod fastboot_lock_gates;
 pub mod locked_handoff;
+pub mod boot_failure_fallback;
 
 use crate::{PatchDesc, PatchScope};
 
@@ -39,5 +44,11 @@ pub const ABL_PERMISSIVE_PATCHES: &[PatchDesc] = &[
         scope: PatchScope::AblPermissive,
         mandatory: false,
         apply: locked_handoff::apply,
+    },
+    PatchDesc {
+        name: "patch12-boot-failure-fastboot-fallback",
+        scope: PatchScope::AblPermissive,
+        mandatory: false,
+        apply: boot_failure_fallback::apply,
     },
 ];

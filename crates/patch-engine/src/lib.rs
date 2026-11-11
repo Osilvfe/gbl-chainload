@@ -410,8 +410,8 @@ mod tests {
     #[test]
     fn ensure_init_scoped_skips_oem() {
         let eng = Engine::ensure_init_scoped(Oem::None, true);
-        // abl_permissive has 3 patches.
-        assert_eq!(eng.table().len(), 3);
+        // abl_permissive has 4 patches.
+        assert_eq!(eng.table().len(), 4);
         for p in eng.table() {
             assert_eq!(p.scope, PatchScope::AblPermissive);
         }
@@ -421,8 +421,8 @@ mod tests {
     #[test]
     fn ensure_init_scoped_includes_oem() {
         let eng = Engine::ensure_init_scoped(Oem::Oplus, true);
-        // oplus (1) + abl_permissive (3) = 4.
-        assert_eq!(eng.table().len(), 4);
+        // oplus (1) + abl_permissive (4) = 5.
+        assert_eq!(eng.table().len(), 5);
         assert_eq!(eng.table()[0].scope, PatchScope::OemOplus);
     }
 
@@ -438,7 +438,7 @@ mod tests {
     fn firmware_engine_is_abl_permissive_only() {
         // ensure_init (no-feature path) returns the abl_permissive table.
         let eng = Engine::ensure_init();
-        assert_eq!(eng.table().len(), 3);
+        assert_eq!(eng.table().len(), 4);
         for p in eng.table() {
             assert_eq!(p.scope, PatchScope::AblPermissive);
         }

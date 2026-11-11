@@ -351,6 +351,90 @@ fn patch11_clean_miss_without_anchor() {
     assert_eq!(locked_handoff::apply(&mut work, size), PatchOutcome::Miss);
 }
 
+// --- patch12 — boot-failure fastboot fallback -------------------------
+
+const PATCH12_ANCHOR_LOCKED: &[u8] = b"if olock secure lock state, Not allow Fastboot.";
+const PATCH12_ANCHOR_VERIFY: &[u8] = b"fastboot_unlock_verify error and reboot";
+const ARM64_NOP: u32 = 0xD503_201F;
+const ARM64_MOV_W0_RESET_REASON: u32 = 0x5280_07C0;
+
+#[test]
+fn patch12_table_membership() {
+    let p = patch_engine::abl_permissive::ABL_PERMISSIVE_PATCHES
+        .iter()
+        .find(|p| p.name == "patch12-boot-failure-fastboot-fallback")
+        .expect("patch12 missing from abl_permissive table");
+    assert!(!p.mandatory, "patch12 must be optional (never blocks chainload)");
+}
+
+#[test]
+fn patch12_nops_both_reset_exits_and_is_idempotent() {
+    let buf = match infiniti_pe() {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP: patch12 — fixture missing");
+            return;
+        }
+    };
+    let size = buf.len() as u32;
+    let mut work = buf.clone();
+
+    // Both anchors resolve to the same `MOV W0,#0x3E; BL <reset>` shape.
+    let mut call_offs = Vec::new();
+    for anchor in [PATCH12_ANCHOR_LOCKED, PATCH12_ANCHOR_VERIFY] {
+        let (r, str_off) = scan_for(&work, anchor, None);
+        assert_eq!(r, ScanResult::Found, "patch12 anchor string not unique");
+        let (r, adrp_off) = find_adrp_add_targeting(&work, str_off, true);
+        assert_eq!(r, ScanResult::Found, "patch12 anchor xref not unique");
+        assert_eq!(
+            read_instr_u32(&work, adrp_off + 0x10),
+            ARM64_MOV_W0_RESET_REASON,
+            "reset-reason MOV drifted"
+        );
+        call_offs.push(adrp_off + 0x14);
+    }
+
+    use patch_engine::abl_permissive::boot_failure_fallback;
+    assert_eq!(
+        boot_failure_fallback::apply(&mut work, size),
+        PatchOutcome::Ok
+    );
+
+    for off in &call_offs {
+        assert_eq!(
+            read_instr_u32(&work, *off),
+            ARM64_NOP,
+            "reset call at 0x{off:x} was not NOPed"
+        );
+    }
+
+    // The retry-count machinery must be untouched.
+    let (r, retry_str) = scan_for(&work, b"A/B retry count NOT decremented", None);
+    assert_eq!(r, ScanResult::Found);
+    let (r, retry_adrp) = find_adrp_add_targeting(&work, retry_str, true);
+    assert_eq!(r, ScanResult::Found);
+    assert_ne!(read_instr_u32(&work, retry_adrp - 0x04), ARM64_NOP);
+    assert_ne!(read_instr_u32(&work, retry_adrp - 0x10), ARM64_NOP);
+
+    let snapshot = work.clone();
+    assert_eq!(
+        boot_failure_fallback::apply(&mut work, size),
+        PatchOutcome::Ok
+    );
+    assert_eq!(work, snapshot, "patch12 must be idempotent");
+}
+
+#[test]
+fn patch12_clean_miss_without_anchor() {
+    let mut work = vec![0u8; 4096];
+    let size = work.len() as u32;
+    use patch_engine::abl_permissive::boot_failure_fallback;
+    assert_eq!(
+        boot_failure_fallback::apply(&mut work, size),
+        PatchOutcome::Miss
+    );
+}
+
 // --- Engine-level integration tests -----------------------------------
 
 #[test]
@@ -365,10 +449,10 @@ fn engine_scoped_oplus_applies_all_three() {
     let mut work = buf.clone();
     let engine = Engine::ensure_init_scoped(Oem::Oplus, true);
     let r = engine.apply(&mut work);
-    // patch7 (1) + patch10 (1) + patch6 (1) + patch11 (1) = 4 applied.
+    // patch7 + patch10 + patch6 + patch11 + patch12 = 5 applied.
     assert_eq!(
-        r.applied_count, 4,
-        "expected patch7 + patch10 + patch6 + patch11 all OK on infiniti PE"
+        r.applied_count, 5,
+        "expected patch7 + patch10 + patch6 + patch11 + patch12 all OK"
     );
     assert_eq!(r.missed_count, 0);
     assert_eq!(r.worst, Worst::Ok);
@@ -386,8 +470,8 @@ fn engine_scoped_none_only_runs_abl_permissive() {
     let mut work = buf.clone();
     let engine = Engine::ensure_init_scoped(Oem::None, true);
     let r = engine.apply(&mut work);
-    // patch10 + patch6 + patch11.
-    assert_eq!(r.applied_count, 3);
+    // patch10 + patch6 + patch11 + patch12.
+    assert_eq!(r.applied_count, 4);
     assert_eq!(r.missed_count, 0);
     assert_eq!(r.worst, Worst::Ok);
 
@@ -409,7 +493,7 @@ fn engine_firmware_path_only_abl_permissive() {
     // Engine::ensure_init() is the firmware-mode entry point — must
     // contain exactly the abl_permissive set.
     let engine = Engine::ensure_init();
-    assert_eq!(engine.table().len(), 3);
+    assert_eq!(engine.table().len(), 4);
     for p in engine.table() {
         assert_eq!(p.scope, PatchScope::AblPermissive);
     }
