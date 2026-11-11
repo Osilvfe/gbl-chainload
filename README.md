@@ -131,3 +131,130 @@ then creates a draft for review. Manual dispatch takes the same existing tag
 and does not create one. Historical `v...` tags and b4 checkpoints remain
 available, but do not trigger new releases. Artifact filenames and changelog
 version headings retain their existing version format.
+
+## GBL FastbootLib boot fixes
+
+`fastboot boot` entered through GBL's own FastbootLib (VolUp) differs from the
+patched ABL path (VolDown): the GBL build has no patch7/patch10. An unlocked
+device always reports the `ORANGE` verified-boot state, independent of the boot
+image's signature, so even a stock boot image hits GBL's unlocked warning menu
+(`PRESS POWER KEY TO PAUSE BOOT`). In this call context the menu's wait loop
+busy-waits on the key-detection event instead of pumping it, and observed
+behaviour is that `fastboot boot` does not proceed, for stock and non-stock
+images alike.
+
+`scripts/gbl-fastboot-boot-fix.py` applies byte-validated edits:
+
+```bash
+scripts/gbl-fastboot-boot-fix.py --in gbl-chainload-debug.efi \
+    --out gbl-chainload-debug-socfix.efi \
+    --boot-menu --no-menu-wait --soc-info
+scripts/gbl-fastboot-boot-fix.py --in gbl-chainload-debug.efi \
+    --out gbl-chainload-debug-bootfix-nodtbo.efi --boot-menu --no-dtbo
+```
+
+- `--boot-menu` — skip the ORANGE warning/pause menu and continue booting.
+- `--soc-info` — hard-code the DTB matcher's platform values: `BoardSocId`
+  (`0x294`), `BoardSocRev` (`0x20000`) and board variant (`8`) on fairlady.
+  GBL never initialises the `.data` globals behind `sub_D344`, `sub_D350` and
+  `sub_C9D4`; left at 0 every `vendor_boot` blob fails the `qcom,msm-id` gate
+  (`No match found for Soc Dtb type`) and every dtbo entry fails the
+  `qcom,board-id` gate (`Unable to find the Board Dtb`). `--soc-id`,
+  `--soc-rev` and `--board-variant` override them for other boards.
+- `--no-dtbo` — return the main DTB without applying the dtbo overlay, and stop
+  emitting `androidboot.dtbo_idx`. `androidboot.dtb_idx` is still emitted, and
+  the base DTB still comes from `vendor_boot`; this branch only removes the
+  dtbo overlay. It does not bypass AVB.
+- `--no-menu-wait` — make `sub_4C914`, the menu wait loop, return immediately.
+  That loop is `while (qword_AE0B0 != 0) delay(10ms)`; `qword_AE0B0` is the
+  key-detection timer event, cleared only by its own notify, and the loop is a
+  pure counter delay that does not pump events. In the GBL `fastboot boot`
+  context it was observed not to recover, so any menu path reaching it hangs.
+  This edit removes the wait outright rather than relying on that timing.
+- `--log-all` — make the firmware log mask accept every level. Every
+  `sub_3E2C(level, ...)` call ends in `sub_3EB4`, which returns early unless
+  `(sub_38274() & level) != 0`; `sub_38274` reads `dword_54AF8`, which is
+  `0x80000042` in this build. `BootLinux`'s load-address prints use `0x400000`,
+  so they are unreachable regardless of build flags or branch patching; this
+  option rewrites the getter to return `~0`. Diagnostics only — it floods the
+  64 KiB log ring, so read the rotated `UefiLogSaved*.txt` files.
+- `--mark bootfix|nodtbo|socfix|logall` — rewrite the Fastboot screen `BUILD - ...`
+  line so the running payload can be identified (`gbl-chainload-dbgfx` /
+  `gbl-chainload-nodtb` / `gbl-chainload-socfx`). Use it to confirm which EFI
+  is actually live. `--mark logall` prints `gbl-chainload-logal`.
+
+The script checks the expected instruction words, is idempotent, and refuses an
+unknown base EFI. It is scoped to the GBL EFI: normal Android boot through the
+patched ABL is unaffected.
+
+`--no-dtbo` in the byte-patch script was historically a **variant of the EFI**.
+Source builds expose it as a separate device-side command, so one EFI covers
+both paths. The fastboot wire protocol gives `oem ...` no data phase, so the
+image is uploaded with `stage` first:
+
+```bash
+fastboot stage boot.img
+fastboot oem boot-nodtbo
+```
+
+`oem boot-nodtbo` boots the staged payload without loading the dtbo partition
+or applying its overlay, and without advertising `androidboot.dtbo_idx`. The
+base DTB still comes from the boot/vendor_boot image, and AVB is still run.
+Plain `fastboot boot <image>` keeps the dtbo overlay.
+
+### Boot trace on logfs (`\GblTrace.txt`)
+
+`UefiLog1.txt` is written by the platform status-code handler and only reaches
+logfs at "write final log", immediately before `ExitBootServices`. A boot that
+hangs earlier leaves **no record at all**. `LogFsLib` therefore appends one line
+per milestone to `\GblTrace.txt` and flushes it immediately:
+
+```text
+entry: build=... boardInit=... chip=0x294 ver=0x20000 plat=8
+enter: fastbootlib
+cmd: boot size=0x... skipdtbo=1
+cmd: avb status=Success hdr=2 imgs=2 state=1
+bootlinux: pname=boot skipdtbo=1
+kernel: gzip size=0x... room=0x...
+kernel: gzip done out=0x...
+dtb: hdr=2 img=0x... off=0x... skip=1 dtbo=0
+dtb: appended-overlay=Success
+cmdline: status=Success len=...
+dt-update: status=Success
+pre-ebs
+```
+
+The file is deleted on every `LogFsInit`, so it always describes the most
+recent boot, and it is capped at 48 KiB. Read it from Android with:
+
+```bash
+su -c "mkdir -p /data/local/tmp/logfs && mount -t vfat /dev/block/by-name/logfs /data/local/tmp/logfs"
+adb pull /data/local/tmp/logfs/GblTrace.txt
+```
+
+### Building the fastboot-boot fix from source (native, no Docker)
+
+`scripts/build-native.sh` builds the debug GBL directly on the host and emits
+`dist/gbl-chainload-debug-gcc5.efi`:
+
+```bash
+scripts/build-native.sh
+# optional: scripts/build-native.sh --release --output dist/gbl-chainload.efi
+```
+
+The script creates a local GCC wrapper (`-std=gnu17 -Wno-error`) and a private
+EDK2 tools mirror whose `GccBase.lds` drops `.eh_frame`/`.eh_frame_hdr`; both
+are required with current binutils/GCC and do not modify the `edk2` submodule.
+The EDK2-side changes live in `scripts/edk2/gbl-edk2-fixes.patch` and are
+applied idempotently on every run. They keep AVB verification intact but mark
+`fastboot boot` with
+`BootInfo.SkipVerifiedBootUi`, so the ORANGE warning menu and its key-event
+wait are skipped. `GblChainloadEntry` calls `BoardInit()` after loading the GBL
+FV, which populates the same platform globals LinuxLoader uses instead of
+hard-coding one board's `msm-id`/`board-id`. The same patch adds
+`BootInfo.SkipDtboOverlay` and the `oem boot-nodtbo` command, which skips
+`LoadAndValidateDtboImg`, the board-dtbo overlay, and `androidboot.dtbo_idx`.
+The same patch fixes the `LibUfdt` overlay bump allocator: the old code kept
+its offset in a `static int` that was never reset and left a freed buffer
+pointer behind, so a second overlay in the same boot either allocated from a
+stale offset or double-freed.

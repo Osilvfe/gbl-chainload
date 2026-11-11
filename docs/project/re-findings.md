@@ -84,3 +84,316 @@ Evidence to preserve:
 ## Live fixture note
 
 - Test fixture naming and harness coverage remain documented in `tests/images/README.md`.
+
+## GBL FastbootLib boot path (OnePlus 15T / fairlady, gbl-chainload-debug.efi)
+
+- Path: `fastboot boot` handler `sub_2FF60` → `sub_32DE8` (load/authenticate) →
+  `sub_3EA54` (AVB result + verified-boot menu) → `sub_D7DC` (`BootLinux`).
+- `ORANGE` (state `[X19+0x438] == 1`) is the normal state of an **unlocked**
+  device, not a signature failure. `sub_3F80C` reads `sub_A2B8()`
+  (`IsUnlocked`) at `0x3F858`, stores it in the local at `0x3F8BC`, and at
+  `0x40CEC` sets state `1` whenever it is non-zero; only when it is zero does
+  the AVB result byte at `[X25]` pick GREEN (0) or YELLOW (2). The ABL boot path
+  (`sub_3F80C`) computes it the same way, which is exactly why patch7 exists.
+  Consequence: a stock-signed boot image still gets ORANGE on an unlocked
+  device, and GBL has no patch7/patch10 of its own.
+- The hang is the ORANGE menu (index 1: `<!>` + "The boot loader is
+  unlocked..." + "PRESS POWER KEY TO PAUSE BOOT"), reached from
+  `0x3F3AC B.EQ 0x3F428`. Menu entry 1 gets timeout `0xA` (10 s) at
+  `[menu+0x4C]`, but the wait loop `sub_4C914` busy-waits via `sub_4FC4`
+  while the key-detection timer event (`qword_AE0B0`) is still installed and
+  never calls the event dispatcher. If that event's notify never runs, the
+  event is never cleared and the loop never exits. This matches the observed
+  behaviour: both a stock and a non-stock boot image stop on the same screen,
+  so the blocker is the menu, not AVB. The transport stays alive; this is not
+  a crash. The fix below does not depend on which of the two it is: skipping
+  the menu removes the wait entirely.
+- Fix (fastboot-only scope): at `0x3F428` rewrite
+  `LDRB W8,[X29,#var_8]` (`0x394063A8`) to `B loc_3F4F8` (`0x14000034`).
+  This skips the whole ORANGE menu block and resumes at the shared
+  "continue boot" path. The block is only reachable from the state-1 branch
+  (`0x3F3AC B.EQ`), and `BootLinux` is only reached from GBL `fastboot boot`,
+  so normal chain-loaded Android boot is unaffected.
+- dtbo overlay in `BootLinux`: every overlay application funnels through
+  `sub_10FB8` → `sub_10AB4` → `sub_2681C` → `sub_25FC0`
+  (`ufdt_overlay_apply`). At `0x10B24` (`BL sub_2681C`, `0x9400573E`) replace
+  with `MOV X0,X21` (`0xAA1503E0`); `X21` is `sub_25F00`'s main-FDT copy and
+  is non-NULL there, so the call reports success without modifying the DTB and
+  the later size/copy path still runs.
+  Do **not** return `0`: `sub_2681C` returns a pointer on success.
+- `androidboot.dtbo_idx` is emitted by `sub_1BD50` at `0x1CA1C`
+  (`B.EQ loc_1CA6C`, `0x54000280`). Rewrite to `B loc_1CA6C`
+  (`0x14000014`) to suppress it. `androidboot.dtb_idx` still describes the
+  selected base DTB and is kept.
+- The Fastboot screen's `BUILD - <name>` line lives at `0x77458` (19-char
+  name). `--mark` rewrites it to `gbl-chainload-dbgfx` / `gbl-chainload-nodtb`
+  so the live payload is identifiable on screen; the length is unchanged.
+- `sub_4C914` is the shared menu wait loop:
+  `while (qword_AE0B0 != 0) sub_4FC4(10000);`. `qword_AE0B0` is the
+  key-detection timer event created by `sub_4C9B8`; only its own notify
+  (`sub_4CABC` → `sub_4C854`) clears it. `sub_4FC4` is a pure `CNTPCT_EL0`
+  delay and does not pump events, and in the GBL `fastboot boot` context the
+  loop was observed not to recover. Treating that as a hang is an observation,
+  not a proof: timer-event notify runs from the timer interrupt. Either way,
+  `--no-menu-wait` rewrites the prologue to `MOV W0,#1; RET`
+  (`0x52800020`, `0xD65F03C0`) and removes the dependency on it.
+- Tooling: `scripts/gbl-fastboot-boot-fix.py --boot-menu [--no-dtbo] [--no-menu-wait] [--mark X]`
+  validates the original instruction words, is idempotent, and refuses any
+  other base EFI. Offsets are file offsets because the PE has ImageBase 0 and
+  file offset == RVA. Base EFI used here:
+  `gbl-chainload-debug.efi` sha256
+  `5f849600c0fa2912ce4622c924240917080b58465588c4c3b0d2b298e11b38a8`.
+
+### Why `fastboot boot` still stops after the menu fix (DTB match)
+
+With the ORANGE menu and `dtbo_idx` edits applied, `fastboot boot` reaches
+`BootLinux` and then goes silent. The GBL log (`fastboot boot`, slot `_b`)
+shows:
+
+```
+[57201]Memory Base Address: 0x80000000
+[57307]No match found for Soc Dtb type
+[57307]Error: Appended Soc Device Tree blob not found
+```
+
+The 106 ms gap is the DTB scan, not a hang: `BootLinux` calls
+`sub_12648(dtb_base, dtb_end, dtb_start)` (`0xEBDC`), which walks the FDTs in
+the `vendor_boot` v4 DTB area and returns 0 when nothing matched, so
+`0xEBE0 CBZ X0, 0xED78` takes the error path and `BootLinux` returns without
+sending a fastboot FAIL.
+
+Layout check on this device's `vendor_boot_b` (`/tmp/vb_b.img`): page 4096,
+header 0x850, `vendor_ramdisk_size` 0x12ddc5d, so the DTB area starts at
+`0x1000 + align_up(0x12ddc5d, 0x1000) = 0x12df000`; `dtb_size` is 0x744972 and
+the area holds 14 back-to-back FDTs. All 14 carry only `qcom,msm-id` (two
+cells) and `qcom,board-id = <0 0>`; `qcom,msm-id` covers 0x294/0x295/0x2ad/
+0x2d7/0x2c0 plus 0x1000xxx variants, with soc-rev 0x10000/0x20000.
+
+The match gate is inside `sub_128EC`:
+`LDRH [dtb_msm_id]` vs `(u16)sub_D344()`; only a hit sets bit 58
+(`0x0400000000000000`), and at `LABEL_302` (`*v8 >> 0x3a & 1`) nothing else is
+accepted. `sub_D344` returns `dword_9726C`, `sub_D350` returns `dword_97280`
+(the `qcom,msm-id` second cell). Both live in `.data`, are **zero in the file,
+and have no writer anywhere in the GBL image** — xrefs to the whole
+`0x97240..0x972A8` block only ever read them, and no literal-pool reference
+exists. The ABL populates its copies through the DevInfo protocol
+(`sub_4E50` in the stock ABL); GBL's boot path never does.
+
+Ground truth for this board comes from the stock ABL's own log (UEFILog1.txt):
+
+```
+soc PfId= 0x294 Soc= 0x20000 Fid= 0x0 DVId= 0x8 ...
+board PfId= 294 Soc= 20000 ...
+```
+
+so `BoardSocId = 0x294` and `BoardSocRev = 0x20000`, which selects the
+"Canoe v2 SoC" family (0x294 / 0x20000) out of the 14 blobs.
+
+Fix (`--soc-info`, scoped to GBL): rewrite `sub_D344` / `sub_D350` to return
+those constants — `MOV W0,#0x294` / `MOV W0,#0x20000`, the following `LDR`
+becomes `NOP`, `RET` stays. This also fixes the `hw-revision` getvar and the
+running-DTB node check at `0x11F74`, which read the same two getters.
+
+### Second gate: `qcom,board-id` on the dtbo entries
+
+With id/rev patched, `fastboot boot` advances past `sub_12648` and dies one
+layer later, in `sub_143A0` (dtbo-table search, called from `0xEC04` when
+`sub_113D0()` reports an exact vendor_boot match):
+
+```
+[47051]Memory Base Address: 0x80000000
+[47158]Unable to find the Board Dtb
+[47158]Error: Board Dtbo blob not found
+```
+
+`dtbo_b` is a standard DT table (magic `0xd7b7ab1e`, 8 entries, 32-byte
+entries, `entries_offset=0x20`). Every entry's root carries
+`qcom,msm-id=<...>` and `qcom,board-id = <8 0>`, plus `oplus,project-id`
+(0x64DD or 0x650F) and `oplus,hw-id`. `sub_143A0` runs the same `sub_128EC`
+matcher but with `a3 = 57`, i.e. it accepts a candidate only when **bit 57**
+is set, and bit 57 is the variant gate:
+
+```
+LDR  W8,[X20,#0x14]     ; board-id cell 0, byte-swapped
+AND  W21,W8,#0xFF       ; 0x08000000 -> 0x08
+BL   sub_C9D4           ; dword_97258: BoardVariant / DevInfo DVId
+CMP  W21,W0
+B.NE fail
+ORR  X8,X8,#0x200000000000000
+```
+
+`sub_C9D4` reads `dword_97258`, which is **also never written in GBL** and is 0
+in the file, while the dtbo entries and the ABL log (`DVId= 8`) both say 8.
+Result: no dtbo entry can ever satisfy bit 57, so `v32` stays 0 and the board
+DTB lookup fails. (`sub_D398`, which mixes `dword_97258/5C/60`, depends on the
+same value.)
+
+Fix: rewrite `sub_C9D4` (`0xC9D4`) to `MOV W0,#8` (`0x52800100`), `NOP` the
+`LDR`, keep the `RET`. `--soc-info` now applies all three getters
+(`--soc-id`, `--soc-rev`, `--board-variant` override them).
+
+### Verified: GBL `fastboot boot` works once the DTB matcher is fed real data
+
+With `--soc-info` applied, `fastboot boot` from GBL's own FastbootLib boots
+UniXNU/Mu-Silicium (`UniXNU-fairlady-run220-turnip-metal-boot.img`, a v4 boot
+image: 4096-byte page, gzip `Image` at `0x1000`, `ramdisk_size = 0`, no
+appended DTB, empty cmdline). Sequence in the GBL log:
+
+```
+Memory Base Address: 0x80000000
+Apply Overlay total time: 120 ms
+Update Device Tree total time: 74 ms
+Shutting Down UEFI Boot Services: ...
+Start EBS
+```
+
+So `sub_12648` → `sub_143A0` → `sub_10FB8`/`sub_10AB4` → `sub_15FCC` →
+EBS → kernel handoff is functional. The earlier "hang" was entirely the two
+uninitialised platform-info getters, not the boot path.
+
+### Stock Android still cannot boot from GBL's FastbootLib
+
+A/B comparison of the *same* `fastboot boot /home/osilvfe/Downloads/boot.img`
+(96 MiB stock boot image, `ramdisk_size = 0`, ramdisk lives in vendor_boot):
+
+| step | ABL fastboot (boot 320, succeeds) | GBL FastbootLib (boot 318, silent) |
+|---|---|---|
+| `soc PfId= 0x294 Soc= 0x20000` | yes | absent |
+| `Booting from slot (_b)` | yes | absent |
+| `Loaded Partition: pvmfw`, per-slot AVB | yes | only the downloaded image |
+| `AddOppoBootModeBootconfigLen` | 1246 | absent |
+| `AddOppoBootModeCmdLineLen` | 2469 | absent |
+| cmdline | `androidboot.*`, `oplusboot.*`, `rootwait ro init=/init`, ... | vendor_boot's `video=vfb ... console=ttynull buildvariant=user msm_drm...` |
+| `Modifying Host Kernel DT to add AVF data` | yes | absent |
+
+The 2469-byte cmdline / 1246-byte bootconfig are produced inside ABL from
+`oplusreserve1`, RPMB boot info, project name, DDR info, SKU queries and
+`system_debug` data. GBL has none of that logic. Without `root=` and
+`androidboot.slot_suffix`, and with `boot.img` carrying no ramdisk (the real
+one is in `vendor_boot`), the kernel never reaches a point where it can panic,
+which is why `pstore` stays empty and `/data/debugging/last_kmsg.txt` is never
+created. Boot reason afterwards is `0x0 / Normal Boot`, not a kernel panic.
+
+Conclusion: GBL's FastbootLib is usable for self-contained images (UniXNU-style
+payloads that carry their own cmdline semantics and do not need the oplus
+parameters). Booting stock Android through it would require porting ABL's
+`AddOppoBootModeCmdLine`/`AddOppoBootModeBootconfig` generation and the
+vendor_boot ramdisk handoff into GBL.
+
+### Why the load-address prints never appear (`--log-all`)
+
+`sub_3E2C(level, fmt, ...)` → `sub_3E80` → `sub_3EB4`, whose first statement is
+`if ((sub_38274() & level) == 0) return;`. `sub_38274()` returns
+`dword_54AF8`, which is `0x80000042` here: only `ERROR` (0x80000000), `0x40`
+and `0x2`. The `BootLinux` prints (`Kernel Load Address`, `Ramdisk Size
+Actual`, `Device Tree Load Address`, ...) use level `0x400000`, so they are
+filtered inside the logger — not by any branch. The surrounding
+`TST W0,#0xFF; B.EQ` sequences are dead code because `sub_4348(x)` is just
+`x != 0`, and every call passes a non-zero level. Patching those branches
+changes nothing; `--log-all` instead rewrites `sub_38274` (`0x38274`) to
+`MOVN W0,#0` (`0x12800000`), NOPs the `LDR`, and keeps the `RET`.
+
+### `--no-dtbo` sites are on the live path
+
+`ApplyOverlay` is `sub_10FB8` → `sub_10AB4`, called from `BootLinux` at
+`0xEE48` and `0xEF48` — after DTB selection, on the same path the UniXNU boot
+takes. The overlay apply is `0x10B24 BL sub_2681C`; rewriting it to
+`MOV X0,X21` returns the main FDT from `sub_25F00` untouched. `UpdateCmdline`
+(`sub_1BD50`, called once at `0xF0BC`) emits ` androidboot.dtbo_idx=`; its
+`0x1CA1C B.EQ` is rewritten to `B` to suppress the property.
+
+### `oem boot-nodtbo` on a v2 boot image: `&BootForceNormalBoot` aborted the boot
+
+`fastboot oem boot-nodtbo` (source-built GBL) reached `BootLinux`, selected the
+DTB appended to the boot image, and then reset the device before
+`ExitBootServices`. A direct-to-logfs trace (`\GblTrace.txt`) narrowed it to
+`UpdateCmdLineParams()`:
+
+```
+cmdline: params in cmd=0x3F7 cfg=0x0
+cl-step: 11
+cl12: rec=0 ms=1
+cl-step: 12 / 13 / 14        <- then the device reset
+```
+
+`UpdateCmdLine.c` did:
+
+```c
+CHAR8 BootForceNormalBoot = '0';          /* a single CHAR8, no NUL */
+...
+Src = &BootForceNormalBoot;
+AsciiStrCatS (Dst, MaxCmdLineLen, Src);
+```
+
+`AsciiStrCatS` runs `AsciiStrnLenS (Source, CopyLen)` first, so it scans past
+the 1-byte object looking for a terminator. The other call site is safe
+because it passes an explicit length (`sizeof (BootForceNormalBoot)`).
+
+Fix: append a NUL-terminated 2-byte buffer holding the current value. The
+bootconfig path is unchanged.
+
+Why this only showed up now: the block is gated on
+`HeaderVersion <= BOOT_HEADER_VERSION_THREE`. UniXNU/Mu-Silicium images are v4
+and skip the entire block; the mainline image is v2, so v2/v3-only code ran for
+the first time on this device.
+
+With the fix, the trace completes:
+
+```
+cl-step: 15 / 16 / 17 / 18
+cmdline: params=Success
+cmdline: bootcfg=Success
+cmdline: cleared
+cmdline: status=Success
+dt-update: status=Success
+pre-ebs
+```
+
+Trace tooling: `GblChainloadPkg/Library/LogFsLib/Trace.c`. Every line is
+`<uptime_ms> <text>` and is flushed immediately, because `UefiLog1.txt` only
+reaches logfs at "write final log" just before `ExitBootServices` — a boot that
+dies earlier leaves no platform log at all. The file is truncated by
+`LogFsInit()` and capped at 48 KiB; the handle is kept open between lines.
+The call sites are compiled out unless `GBL_TRACE` is defined, which only
+`GblChainloadPkg.dsc` does, so an ABL build of `QcomModulePkg.dsc` is
+unaffected.
+
+### `LibUfdt` overlay arena: stale bump offset and a reachable double free
+
+`EmbeddedPkg/Library/LibUfdt/sysdeps/libufdt_sysdeps_vendor.c` backs
+`ufdt_install_blob` / `ufdt_apply_multi_overlay` with a single 5 MiB bump
+allocator:
+
+```c
+static void* buffer;
+void *dto_malloc(size_t size) { static int ssize = 0; ... }
+```
+
+Three defects, all in that ~20-line block:
+
+1. `ssize` was a function-local `static` that nothing ever reset. A second
+   overlay in the same boot started allocating from the first overlay's end
+   offset, so `dto_malloc` could fail (return `NULL`) even on a fresh buffer.
+2. `post_overlay_free()` freed `buffer` but left the pointer non-`NULL`. That
+   is reachable as a **double free**: `ApplyOverlay()` does
+   `if (DtsList == NULL) goto out;` before `pre_overlay_malloc()`, while `out:`
+   unconditionally calls `post_overlay_free()`. A second call with no overlays
+   therefore frees an already-freed pointer.
+3. `pre_overlay_malloc()` overwrote `buffer` without freeing the previous
+   allocation, so the two early `return EFI_NOT_FOUND` paths in `ApplyOverlay`
+   (install-blob failure, apply-overlay failure) leaked 5 MiB per attempt.
+
+Fix: move the offset to a file-scope `buffer_used`, reset it in both entry
+points, free-and-clear in `pre_overlay_malloc`, and clear in
+`post_overlay_free`. `dto_malloc` now also returns `NULL` when no arena is
+active instead of doing pointer arithmetic on `NULL`.
+
+The allocator's usage window is what makes resetting safe: pointers handed out
+by `dto_malloc` only live between `pre_overlay_malloc()` and
+`post_overlay_free()`, and `ApplyOverlay` copies the final FDT to
+`DeviceTreeLoadAddr` before freeing the arena.
+
+Not the cause of the no-dtbo reset (that was the `&BootForceNormalBoot`
+overread); `fastboot oem boot-nodtbo` skips the overlay entirely. It matters
+for the normal `fastboot boot` path, which can apply the board DTBO, hyp
+DTBOs and the AVF DP DTBO through the same arena in one boot.
