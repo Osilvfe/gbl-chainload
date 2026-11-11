@@ -210,19 +210,23 @@ hangs earlier leaves **no record at all**. `LogFsLib` therefore appends one line
 per milestone to `\GblTrace.txt` and flushes it immediately:
 
 ```text
-entry: build=... boardInit=... chip=0x294 ver=0x20000 plat=8
-enter: fastbootlib
-cmd: boot size=0x... skipdtbo=1
-cmd: avb status=Success hdr=2 imgs=2 state=1
-bootlinux: pname=boot skipdtbo=1
-kernel: gzip size=0x... room=0x...
-kernel: gzip done out=0x...
-dtb: hdr=2 img=0x... off=0x... skip=1 dtbo=0
-dtb: appended-overlay=Success
-cmdline: status=Success len=...
-dt-update: status=Success
-pre-ebs
+    7627 entry: build=gbl-chainload-debug boardInit=Success chip=0x294 ver=0x20000 plat=8
+    8142 enter: fastbootlib
+   14062 cmd: boot size=0x2C6F000 skipdtbo=1
+   14107 cmd: avb status=Success hdr=2 imgs=2 state=1
+   14109 bootlinux: pname=boot_b skipdtbo=1
+   14225 dtb: hdr=2 img=0x2C6ED3B off=0x2C53000 skip=1 dtbo=0
+   14228 dtb: appended-overlay=Success tot=0x1BD3B room=0x201000
+   14231 ram: read=Success n=11
+   14232 ram: update=Success upd=18
+   14262 cmdline: status=Success len=2
+   14431 dt-update: status=Success
+   14436 pre-ebs
 ```
+
+Each line is prefixed with the firmware uptime in milliseconds, which tells a
+hang apart from a watchdog reset. The trace handle is closed just before
+`ExitBootServices`, so no open FAT file is left behind at handoff.
 
 The file is deleted on every `LogFsInit`, so it always describes the most
 recent boot, and it is capped at 48 KiB. Read it from Android with:

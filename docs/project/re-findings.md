@@ -253,7 +253,7 @@ uninitialised platform-info getters, not the boot path.
 
 ### Stock Android still cannot boot from GBL's FastbootLib
 
-A/B comparison of the *same* `fastboot boot /home/osilvfe/Downloads/boot.img`
+A/B comparison of the *same* `fastboot boot <stock boot.img>`
 (96 MiB stock boot image, `ramdisk_size = 0`, ramdisk lives in vendor_boot):
 
 | step | ABL fastboot (boot 320, succeeds) | GBL FastbootLib (boot 318, silent) |
@@ -307,7 +307,9 @@ takes. The overlay apply is `0x10B24 BL sub_2681C`; rewriting it to
 `fastboot oem boot-nodtbo` (source-built GBL) reached `BootLinux`, selected the
 DTB appended to the boot image, and then reset the device before
 `ExitBootServices`. A direct-to-logfs trace (`\GblTrace.txt`) narrowed it to
-`UpdateCmdLineParams()`:
+`UpdateCmdLineParams()`. The numbered lines below came from temporary bisect
+instrumentation that was removed once the defect was found; the shipped trace
+keeps only the milestones listed in the README:
 
 ```
 cmdline: params in cmd=0x3F7 cfg=0x0
