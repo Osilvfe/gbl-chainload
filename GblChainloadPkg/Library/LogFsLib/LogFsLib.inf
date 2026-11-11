@@ -15,6 +15,7 @@
 [Sources]
   Mount.c
   Rotation.c
+  Trace.c
 
 [Packages]
   MdePkg/MdePkg.dec

@@ -161,6 +161,17 @@ MountLogFsRoot (
 
 EFI_STATUS
 EFIAPI
+LogFsTraceMount (VOID)
+{
+  if (gLogFsRoot != NULL) {
+    return EFI_SUCCESS;
+  }
+
+  return MountLogFsRoot (&gLogFsRoot);
+}
+
+EFI_STATUS
+EFIAPI
 LogFsInit (VOID)
 {
   EFI_STATUS Status;
@@ -190,6 +201,9 @@ LogFsInit (VOID)
     LogFsRotateUefiLog (gLogFsRoot, FALSE);
   }
 
+  /* Start this boot's reset-surviving trace from an empty file. */
+  LogFsTraceReset ();
+
   GBL_INFO ("LogFsLib: finished\n");
   return EFI_SUCCESS;
 }
@@ -198,6 +212,10 @@ EFI_STATUS
 EFIAPI
 LogFsClose (VOID)
 {
+  /* Release the trace file first: it is a child of gLogFsRoot and would be
+   * left dangling on a closed volume otherwise. */
+  LogFsTraceClose ();
+
   if (gLogFsRoot != NULL) {
     gLogFsRoot->Close (gLogFsRoot);
     gLogFsRoot = NULL;

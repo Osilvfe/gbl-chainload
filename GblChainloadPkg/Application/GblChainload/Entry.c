@@ -17,6 +17,7 @@
 #include <Library/DeviceInfo.h>
 #include <Library/PartitionTableUpdate.h>
 #include <Library/BootESP.h>
+#include <Library/Board.h>
 #include <Library/LoadFVLib.h>
 #include <Library/LogFsLib.h>
 #include <Library/Recovery.h>
@@ -128,6 +129,7 @@ CommonEarlyInit (
   EnumeratePartitions ();
   UpdatePartitionEntries ();
   SignalSDDetection ();
+
   LoadDriversFromCurrentFv (ImageHandle);
 
   Status = LogFsInit ();
@@ -135,14 +137,45 @@ CommonEarlyInit (
     /* Always show fatal/recovery messages even with GBL_DEBUG=0. */
     Print (L"!!! LOGFS PARTITION NOT FOUND - LOGGING TO CONSOLE ONLY !!!\n");
   }
+
+  /*
+   * LinuxLoader runs BoardInit() before selecting a DTB or building the boot
+   * command line.  GBL runs in the same UEFI environment but did not call it,
+   * leaving the BootLib platform globals zeroed: vendor_boot's qcom,msm-id
+   * check then fails, and the dtbo qcom,board-id match cannot see the board
+   * variant.  Populate the same data here so DTB selection works from GBL's
+   * fastboot boot path without hard-coding values for one device.
+   */
+  Status = BoardInit ();
+  if (EFI_ERROR (Status)) {
+    GBL_INFO ("BoardInit failed: %r (DTB matching may fall back to zeros)\n",
+              Status);
+  } else {
+    GBL_INFO ("board: rawChipId=0x%x chipVersion=0x%x platform=%u version=0x%x\n",
+              BoardPlatformRawChipId (), (UINT32)BoardPlatformChipVersion (),
+              (UINT32)BoardPlatformType (), BoardPlatformVersion ());
+  }
+  {
+    CHAR8 TraceBuf[128];
+
+    AsciiSPrint (TraceBuf, sizeof (TraceBuf),
+                 "entry: build=%a boardInit=%r chip=0x%x ver=0x%x plat=%u\n",
+                 GBL_BUILD_NAME, Status, BoardPlatformRawChipId (),
+                 (UINT32)BoardPlatformChipVersion (),
+                 (UINT32)BoardPlatformType ());
+    LogFsTrace (TraceBuf);
+  }
 }
 
 STATIC VOID
 EnterFastboot (VOID)
 {
   EFI_STATUS Status;
+  CHAR8      TraceBuf[64];
 
   SCR_PRINT (L"gbl-chainload: entering FastbootLib\n");
+  AsciiSPrint (TraceBuf, sizeof (TraceBuf), "enter: fastbootlib\n");
+  LogFsTrace (TraceBuf);
   LogFsClose ();
 
   Status = FastbootInitialize ();

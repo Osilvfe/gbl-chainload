@@ -150,7 +150,11 @@
 # Build options — mirrors QcomModulePkg.dsc [BuildOptions.common]
 ################################################################################
 [BuildOptions.common]
-  GCC:*_*_*_ARCHCC_FLAGS  = -Wno-shift-negative-value -fstack-protector-all -Wno-varargs -fno-common -Wno-misleading-indentation -Wno-unknown-warning-option
+  # GBL_TRACE enables the direct-to-logfs trace in the BootLib/FastbootLib
+  # patch set (see scripts/edk2/gbl-edk2-fixes.patch). It is defined
+  # here, not in the submodule, so an ABL build of QcomModulePkg.dsc compiles
+  # those call sites out and needs no GblChainloadPkg library.
+  GCC:*_*_*_ARCHCC_FLAGS  = -Wno-shift-negative-value -fstack-protector-all -Wno-varargs -fno-common -Wno-misleading-indentation -Wno-unknown-warning-option -DGBL_TRACE=1
   GCC:*_*_*_DLINK_FLAGS = -Wl,-Ttext=0x0
   # PR2 Task 4: link crates/gblp1's aarch64-unknown-uefi staticlib (built
   # ahead of the EDK2 build by scripts/build-inside-docker.sh). This

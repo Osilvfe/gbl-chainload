@@ -1,0 +1,419 @@
+diff --git a/EmbeddedPkg/Library/LibUfdt/sysdeps/libufdt_sysdeps_vendor.c b/EmbeddedPkg/Library/LibUfdt/sysdeps/libufdt_sysdeps_vendor.c
+index f5465d8..ad38d65 100644
+--- a/EmbeddedPkg/Library/LibUfdt/sysdeps/libufdt_sysdeps_vendor.c
++++ b/EmbeddedPkg/Library/LibUfdt/sysdeps/libufdt_sysdeps_vendor.c
+@@ -188,9 +188,19 @@ void dto_qsort(void *base, size_t nmemb, size_t size,
+  */
+ 
+ static void* buffer;
++static size_t buffer_used;
+ 
+ void* pre_overlay_malloc()
+ {
++	/* A previous overlay may have exited early (ApplyOverlay returns on
++	 * failure without ever reaching post_overlay_free), so never leak the
++	 * old buffer and never reuse its bump offset for a new allocation. */
++	if (buffer != NULL) {
++		FreePool(buffer);
++		buffer = NULL;
++	}
++	buffer_used = 0;
++
+ 	buffer = AllocatePool(PRE_ALLOC_BUFFER_SZ);
+ 	if (!buffer) {
+ 		return NULL;
+@@ -200,20 +210,28 @@ void* pre_overlay_malloc()
+ 
+ void post_overlay_free()
+ {
+-	if (buffer)
++	/* Clear the pointer: ApplyOverlay's `DtsList == NULL` path reaches this
++	 * without a matching pre_overlay_malloc, and leaving a freed pointer
++	 * here turns that into a double free. */
++	if (buffer) {
+ 		FreePool(buffer);
++		buffer = NULL;
++	}
++	buffer_used = 0;
+ }
+ 
+ void *dto_malloc(size_t size) {
+-	static int ssize = 0;
+-        void *retbuf;
++	void *retbuf;
+ 
+-	if (((MAX_UINT64 - ssize) < size) || ((ssize + size) > PRE_ALLOC_BUFFER_SZ)) {
++	if (buffer == NULL) {
++		return NULL;
++	}
++	if (size > PRE_ALLOC_BUFFER_SZ - buffer_used) {
+ 		return NULL;
+ 	}
+ 
+-	retbuf = buffer + ssize;
+-	ssize += size;
++	retbuf = (char *)buffer + buffer_used;
++	buffer_used += size;
+ 	return retbuf;
+ }
+ 
+diff --git a/QcomModulePkg/Include/Library/BootLinux.h b/QcomModulePkg/Include/Library/BootLinux.h
+index b511571..2eae4c1 100644
+--- a/QcomModulePkg/Include/Library/BootLinux.h
++++ b/QcomModulePkg/Include/Library/BootLinux.h
+@@ -187,6 +187,8 @@ typedef struct BootInfo {
+   UINTN NumLoadedImages;
+   QCOM_VERIFIEDBOOT_PROTOCOL *VbIntf;
+   boot_state_t BootState;
++  BOOLEAN SkipVerifiedBootUi;
++  BOOLEAN SkipDtboOverlay;
+   CHAR8 *VBCmdLine;
+   UINT32 VBCmdLineLen;
+   UINT32 VBCmdLineFilledLen;
+@@ -262,6 +264,9 @@ typedef struct BootLinuxParamlist {
+   // Filled by AVB helper functions
+   VOID *PvmFwBuffer;
+   UINT64 PvmFwBufferSize;
++  /* Set by `fastboot oem boot-nodtbo`: do not load or apply the dtbo
++   * partition overlay, and do not advertise androidboot.dtbo_idx. */
++  BOOLEAN SkipDtboOverlay;
+ } BootParamlist;
+ 
+ typedef struct {
+diff --git a/QcomModulePkg/Library/BootLib/BootLinux.c b/QcomModulePkg/Library/BootLib/BootLinux.c
+index ea7930e..c34224d 100644
+--- a/QcomModulePkg/Library/BootLib/BootLinux.c
++++ b/QcomModulePkg/Library/BootLib/BootLinux.c
+@@ -88,6 +88,16 @@
+ #include "Bootconfig.h"
+ #include <ufdt_overlay.h>
+ 
++#ifdef GBL_TRACE
++/* GblChainloadPkg/Library/LogFsLib/Trace.c.  Flushed immediately, unlike the
++ * platform log, so the last completed step survives a hang or reset. */
++EFI_STATUS EFIAPI LogFsTrace (IN CONST CHAR8 *Text);
++EFI_STATUS EFIAPI LogFsTraceClose (VOID);
++#define GBL_TRACE_LINE(buf)  LogFsTrace (buf)
++#else
++#define GBL_TRACE_LINE(buf)  do { } while (0)
++#endif
++
+ #ifndef DISABLE_KERNEL_PROTOCOL
+ #include <Protocol/EFIKernelInterface.h>
+ #endif
+@@ -638,7 +648,22 @@ DTBImgCheckAndAppendDT (BootInfo *Info, BootParamlist *BootParamlistPtr)
+           ImageBuffer = BootParamlistPtr->VendorImageBuffer;
+         }
+   }
+-  DtboImgInvalid = LoadAndValidateDtboImg (Info, BootParamlistPtr);
++  if (BootParamlistPtr->SkipDtboOverlay) {
++    DEBUG ((EFI_D_INFO, "SkipDtboOverlay: not loading the dtbo image\n"));
++    DtboImgInvalid = FALSE;
++  } else {
++    DtboImgInvalid = LoadAndValidateDtboImg (Info, BootParamlistPtr);
++  }
++  {
++    CHAR8 TraceBuf[112];
++
++    AsciiSPrint (TraceBuf, sizeof (TraceBuf),
++                 "dtb: hdr=%u img=0x%x off=0x%x skip=%u dtbo=%u\n",
++                 HeaderVersion, ImageSize, BootParamlistPtr->DtbOffset,
++                 (UINT32)BootParamlistPtr->SkipDtboOverlay,
++                 (UINT32)DtboImgInvalid);
++    GBL_TRACE_LINE (TraceBuf);
++  }
+   if (!DtboImgInvalid) {
+ #ifdef AUTO_VIRT_ABL
+     /* For AUTO GVM，there is no device tree to be appended,
+@@ -740,6 +765,16 @@ DTBImgCheckAndAppendDT (BootInfo *Info, BootParamlist *BootParamlistPtr)
+     Status = ApplyOverlay (BootParamlistPtr,
+                            Dtb,
+                            DtsList);
++    {
++      CHAR8 TraceBuf[112];
++
++      AsciiSPrint (TraceBuf, sizeof (TraceBuf),
++                   "dtb: appended-overlay=%r tot=0x%x room=0x%lx\n", Status,
++                   fdt_totalsize (Dtb),
++                   BootParamlistPtr->RamdiskLoadAddr -
++                     BootParamlistPtr->DeviceTreeLoadAddr);
++      GBL_TRACE_LINE (TraceBuf);
++    }
+     if (Status != EFI_SUCCESS) {
+       DEBUG ((EFI_D_ERROR, "Error: Dtb overlay failed\n"));
+       SetVmDisable ();
+@@ -772,7 +807,7 @@ DTBImgCheckAndAppendDT (BootInfo *Info, BootParamlist *BootParamlistPtr)
+ #endif
+ 
+     /*Check do we really need to gothrough DTBO or not*/
+-    DtboCheckNeeded = GetDtboNeeded ();
++    DtboCheckNeeded = GetDtboNeeded () && !BootParamlistPtr->SkipDtboOverlay;
+     if (DtboCheckNeeded == TRUE) {
+       BoardDtb = GetBoardDtb (Info, BootParamlistPtr->DtboImgBuffer);
+       if (!BoardDtb) {
+@@ -932,6 +967,14 @@ GZipPkgCheck (BootParamlist *BootParamlistPtr)
+     Kptr = (Kernel64Hdr *) BootParamlistPtr->KernelLoadAddr;
+     DEBUG ((EFI_D_INFO, "Decompressing kernel image total time: %lu ms\n",
+                          GetTimerCountms () - DecompressStartTime));
++    {
++      CHAR8 TraceBuf[96];
++
++      AsciiSPrint (TraceBuf, sizeof (TraceBuf),
++                   "kernel: gzip in=0x%x out=0x%x\n",
++                   BootParamlistPtr->KernelSize, OutLen);
++      GBL_TRACE_LINE (TraceBuf);
++    }
+   } else {
+     Kptr = (struct kernel64_hdr *)(BootParamlistPtr->ImageBuffer
+                          + BootParamlistPtr->PageSize);
+@@ -1610,6 +1653,17 @@ BootLinux (BootInfo *Info)
+   Recovery = Info->BootIntoRecovery;
+   AlarmBoot = Info->BootReasonAlarm;
+   SilentBootMode = Info->SilentBootMode;
++  BootParamlistPtr.SkipDtboOverlay = Info->SkipDtboOverlay;
++  {
++    CHAR8  TraceBuf[96];
++    CHAR8  PnameAscii[MAX_GPT_NAME_SIZE];
++
++    UnicodeStrToAsciiStr (Info->Pname, PnameAscii);
++    AsciiSPrint (TraceBuf, sizeof (TraceBuf),
++                 "bootlinux: pname=%a skipdtbo=%u\n", PnameAscii,
++                 (UINT32)BootParamlistPtr.SkipDtboOverlay);
++    GBL_TRACE_LINE (TraceBuf);
++  }
+ 
+   if (SilentBootMode) {
+     DEBUG ((EFI_D_INFO, "Silent Mode value: %d\n", SilentBootMode));
+@@ -1851,6 +1905,13 @@ BootLinux (BootInfo *Info)
+ 
+   if (IsCarveoutRemovalEnabled ()) {
+     Status = ReadRamPartitions (&RamPartitions, &NumPartitions);
++    {
++      CHAR8 TraceBuf[80];
++
++      AsciiSPrint (TraceBuf, sizeof (TraceBuf), "ram: read=%r n=%u\n",
++                   Status, NumPartitions);
++      GBL_TRACE_LINE (TraceBuf);
++    }
+     if (EFI_ERROR (Status)) {
+       DEBUG ((EFI_D_ERROR, "Error returned from ReadRamPartitions %r\n",
+               Status));
+@@ -1861,6 +1922,13 @@ BootLinux (BootInfo *Info)
+                             (VOID *)BootParamlistPtr.DeviceTreeLoadAddr,
+                             RamPartitions, NumPartitions,
+                             UpdatedRamPartitions, &NumUpdPartitions);
++    {
++      CHAR8 TraceBuf[80];
++
++      AsciiSPrint (TraceBuf, sizeof (TraceBuf), "ram: update=%r n=%u\n",
++                   Status, NumUpdPartitions);
++      GBL_TRACE_LINE (TraceBuf);
++    }
+     if (Status == EFI_SUCCESS) {
+       UpdRamPartitionsAvail = TRUE;
+     } else {
+@@ -1877,12 +1945,25 @@ BootLinux (BootInfo *Info)
+   Status = UpdateCmdLine (&BootParamlistPtr, FfbmStr, Recovery, FlashlessBoot,
+                     AlarmBoot, Info->VBCmdLine, Info->HeaderVersion,
+                     SilentBootMode);
++  {
++    CHAR8 TraceBuf[96];
++
++    AsciiSPrint (TraceBuf, sizeof (TraceBuf), "cmdline: status=%r len=%u\n",
++                 Status, BootParamlistPtr.FinalBootConfigLen);
++    GBL_TRACE_LINE (TraceBuf);
++  }
+   if (EFI_ERROR (Status)) {
+     DEBUG ((EFI_D_ERROR, "Error updating cmdline. Device Error %r\n", Status));
+     return Status;
+   }
+ 
+   Status = LoadAddrAndDTUpdate (Info, &BootParamlistPtr);
++  {
++    CHAR8 TraceBuf[80];
++
++    AsciiSPrint (TraceBuf, sizeof (TraceBuf), "dt-update: status=%r\n", Status);
++    GBL_TRACE_LINE (TraceBuf);
++  }
+   if (Status != EFI_SUCCESS &&
+           BoardPlatformType () != EFI_PLATFORMINFO_TYPE_RUMI) {
+        return Status;
+@@ -1935,6 +2016,16 @@ BootLinux (BootInfo *Info)
+ 
+   DEBUG ((EFI_D_INFO, "\nShutting Down UEFI Boot Services: %lu ms\n",
+           GetTimerCountms ()));
++  {
++    CHAR8 TraceBuf[64];
++
++    AsciiSPrint (TraceBuf, sizeof (TraceBuf), "pre-ebs\n");
++    GBL_TRACE_LINE (TraceBuf);
++#ifdef GBL_TRACE
++    /* Do not hold an open FAT file across ExitBootServices. */
++    LogFsTraceClose ();
++#endif
++  }
+   /*Shut down UEFI boot services*/
+   Status = ShutdownUefiBootServices ();
+   if (EFI_ERROR (Status)) {
+diff --git a/QcomModulePkg/Library/BootLib/UpdateCmdLine.c b/QcomModulePkg/Library/BootLib/UpdateCmdLine.c
+index 4631cb5..828140b 100644
+--- a/QcomModulePkg/Library/BootLib/UpdateCmdLine.c
++++ b/QcomModulePkg/Library/BootLib/UpdateCmdLine.c
+@@ -736,6 +736,11 @@ UpdateCmdLineParams (UpdateCmdLineParamList *Param, CHAR8 **FinalCmdLine,
+   CHAR8 *Dst;
+   UINT32 MaxCmdLineLen = Param->CmdLineLen;
+   BOOLEAN BootConfigFlag = FALSE;
++  /* BootForceNormalBoot is a bare CHAR8 ('0'/'1') that the bootconfig path
++   * uses with an explicit length. Appending it to the kernel cmdline needs a
++   * NUL-terminated string: passing &BootForceNormalBoot made AsciiStrCatS
++   * scan past the 1-byte object while looking for a terminator. */
++  CHAR8 ForceNormalBootStr[2] = { '0', '\0' };
+ 
+   Dst = AllocateZeroPool (MaxCmdLineLen);
+   if (!Dst) {
+@@ -934,7 +939,8 @@ UpdateCmdLineParams (UpdateCmdLineParamList *Param, CHAR8 **FinalCmdLine,
+     if (Param->HeaderVersion <= BOOT_HEADER_VERSION_THREE) {
+       Src = AndroidBootForceNormalBoot;
+       AsciiStrCatS (Dst, MaxCmdLineLen, Src);
+-      Src = &BootForceNormalBoot;
++      ForceNormalBootStr[0] = BootForceNormalBoot;
++      Src = ForceNormalBootStr;
+       AsciiStrCatS (Dst, MaxCmdLineLen, Src);
+     }
+   }
+diff --git a/QcomModulePkg/Library/FastbootLib/FastbootCmds.c b/QcomModulePkg/Library/FastbootLib/FastbootCmds.c
+index 3d6a0e6..29d5402 100644
+--- a/QcomModulePkg/Library/FastbootLib/FastbootCmds.c
++++ b/QcomModulePkg/Library/FastbootLib/FastbootCmds.c
+@@ -98,6 +98,14 @@ EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
+ #include "FastbootCmds.h"
+ #include "FastbootMain.h"
+ #include "LinuxLoaderLib.h"
++
++#ifdef GBL_TRACE
++/* GblChainloadPkg/Library/LogFsLib/Trace.c. */
++EFI_STATUS EFIAPI LogFsTrace (IN CONST CHAR8 *Text);
++#define GBL_TRACE_LINE(buf)  LogFsTrace (buf)
++#else
++#define GBL_TRACE_LINE(buf)  do { } while (0)
++#endif
+ #include "MetaFormat.h"
+ #include "SparseFormat.h"
+ #include "Recovery.h"
+@@ -3146,7 +3154,7 @@ CmdGetVar (CONST CHAR8 *Arg, VOID *Data, UINT32 Size)
+ 
+ #ifdef ENABLE_BOOT_CMD
+ STATIC VOID
+-CmdBoot (CONST CHAR8 *Arg, VOID *Data, UINT32 Size)
++CmdBootImage (CONST CHAR8 *Arg, VOID *Data, UINT32 Size, BOOLEAN SkipDtbo)
+ {
+   boot_img_hdr *hdr = Data;
+   boot_img_hdr_v3 *HdrV3 = Data;
+@@ -3190,6 +3198,24 @@ CmdBoot (CONST CHAR8 *Arg, VOID *Data, UINT32 Size)
+ 
+   SetBootDevImage ();
+ 
++  /*
++   * fastboot boot is a host-driven one-shot boot: unlike the normal boot
++   * path it must not stop in the verified-boot warning menu.  Keep the AVB
++   * verification result, but suppress the UI and its key-event wait.
++   */
++  Info.SkipVerifiedBootUi = TRUE;
++  Info.SkipDtboOverlay = SkipDtbo;
++  if (SkipDtbo) {
++    DEBUG ((EFI_D_INFO, "boot: no-dtbo requested, overlay is disabled\n"));
++  }
++  {
++    CHAR8 TraceBuf[96];
++
++    AsciiSPrint (TraceBuf, sizeof (TraceBuf),
++                 "cmd: boot size=0x%x skipdtbo=%u\n", Size, (UINT32)SkipDtbo);
++    GBL_TRACE_LINE (TraceBuf);
++  }
++
+   Info.Images[0].ImageBuffer = Data;
+   /* The actual image size will be updated in LoadImageAndAuth */
+   Info.Images[0].ImageSize = Size;
+@@ -3210,6 +3236,15 @@ CmdBoot (CONST CHAR8 *Arg, VOID *Data, UINT32 Size)
+                             , &BccParamsRecvdFromAVB
+   #endif
+                             );
++  {
++    CHAR8 TraceBuf[96];
++
++    AsciiSPrint (TraceBuf, sizeof (TraceBuf),
++                 "cmd: avb status=%r hdr=%u imgs=%u state=%u\n", Status,
++                 Info.HeaderVersion, (UINT32)Info.NumLoadedImages,
++                 (UINT32)Info.BootState);
++    GBL_TRACE_LINE (TraceBuf);
++  }
+   if (Status != EFI_SUCCESS) {
+     AsciiSPrint (Resp, sizeof (Resp),
+                  "Failed to load/authenticate boot image: %r", Status);
+@@ -3236,11 +3271,40 @@ CmdBoot (CONST CHAR8 *Arg, VOID *Data, UINT32 Size)
+   FastbootUsbDeviceStop ();
+   ResetBootDevImage ();
+   BootLinux (&Info);
++  {
++    CHAR8 TraceBuf[72];
++
++    AsciiSPrint (TraceBuf, sizeof (TraceBuf), "cmd: bootlinux returned\n");
++    GBL_TRACE_LINE (TraceBuf);
++  }
+ 
+ out:
+   ResetBootDevImage ();
+   return;
+ }
++
++STATIC VOID
++CmdBoot (CONST CHAR8 *Arg, VOID *Data, UINT32 Size)
++{
++  CmdBootImage (Arg, Data, Size, FALSE);
++}
++
++/* `oem boot-nodtbo`: boot a payload staged with `fastboot stage <boot.img>`
++ * (or any preceding download) without loading the dtbo partition or applying
++ * its overlay.  `androidboot.dtbo_idx` is suppressed as well; the base DTB
++ * still comes from the boot/vendor_boot image. */
++STATIC VOID
++CmdOemBootNoDtbo (CONST CHAR8 *Arg, VOID *Data, UINT32 Size)
++{
++  ExchangeFlashAndUsbDataBuf ();
++
++  if (mFlashDataBuffer == NULL || mFlashNumDataBytes == 0) {
++    FastbootFail ("no staged image - run `fastboot stage <boot.img>` first");
++    return;
++  }
++
++  CmdBootImage (Arg, mFlashDataBuffer, (UINT32)mFlashNumDataBytes, TRUE);
++}
+ #endif
+ 
+ STATIC VOID
+@@ -5150,6 +5214,7 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
+ #endif
+       {"oem boot-efi", CmdOemBootEfi},
+       {"oem boot-efi-blockio", CmdOemBootEfiBlockIo},
++      {"oem boot-nodtbo", CmdOemBootNoDtbo},
+       {"oem bcb-recovery", CmdOemBcbRecovery},
+       {"oem bcb-fastboot", CmdOemBcbFastboot},
+       {"oem bcb-clear", CmdOemBcbClear},
+diff --git a/QcomModulePkg/Library/avb/VerifiedBoot.c b/QcomModulePkg/Library/avb/VerifiedBoot.c
+index 4109127..46ceaae 100644
+--- a/QcomModulePkg/Library/avb/VerifiedBoot.c
++++ b/QcomModulePkg/Library/avb/VerifiedBoot.c
+@@ -1823,6 +1823,13 @@ DisplayVerifiedBootScreen (BootInfo *Info)
+   EFI_STATUS Status = EFI_SUCCESS;
+   CHAR8 FfbmStr[FFBM_MODE_BUF_SIZE] = {'\0'};
+ 
++  if (Info->SkipVerifiedBootUi) {
++    DEBUG ((EFI_D_INFO,
++            "fastboot boot: skipping verified-boot UI (state=%d)\n",
++            Info->BootState));
++    return EFI_SUCCESS;
++  }
++
+   if (GetAVBVersion () < AVB_1) {
+     return EFI_SUCCESS;
+   }
