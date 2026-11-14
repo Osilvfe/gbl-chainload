@@ -351,12 +351,28 @@ fn patch11_clean_miss_without_anchor() {
     assert_eq!(locked_handoff::apply(&mut work, size), PatchOutcome::Miss);
 }
 
-// --- patch12 — boot-failure fastboot fallback -------------------------
+// --- patch12 — boot-failure fallback (v3: orange branch disabled) -----
 
 const PATCH12_ANCHOR_LOCKED: &[u8] = b"if olock secure lock state, Not allow Fastboot.";
 const PATCH12_ANCHOR_VERIFY: &[u8] = b"fastboot_unlock_verify error and reboot";
+const PATCH12_ANCHOR_NO_SUPPORT: &[u8] =
+    b"No fastboot support for flashless chipsets, Infinte loop";
 const ARM64_NOP: u32 = 0xD503_201F;
 const ARM64_MOV_W0_RESET_REASON: u32 = 0x5280_07C0;
+
+fn adrp_for(buf: &[u8], anchor: &[u8]) -> u32 {
+    let (r, str_off) = scan_for(buf, anchor, None);
+    assert_eq!(r, ScanResult::Found, "anchor string not unique");
+    let (r, adrp_off) = find_adrp_add_targeting(buf, str_off, true);
+    assert_eq!(r, ScanResult::Found, "anchor xref not unique");
+    adrp_off
+}
+
+fn b_target(word: u32, off: u32) -> u32 {
+    assert_eq!(word >> 26, 0x05, "not an unconditional B at 0x{off:x}");
+    let imm = ((word & 0x03FF_FFFF) as i32) << 6 >> 6;
+    off.wrapping_add((imm * 4) as u32)
+}
 
 #[test]
 fn patch12_table_membership() {
@@ -368,7 +384,7 @@ fn patch12_table_membership() {
 }
 
 #[test]
-fn patch12_nops_both_reset_exits_and_is_idempotent() {
+fn patch12_v3_removes_both_the_reset_and_the_spin() {
     let buf = match infiniti_pe() {
         Some(b) => b,
         None => {
@@ -379,19 +395,22 @@ fn patch12_nops_both_reset_exits_and_is_idempotent() {
     let size = buf.len() as u32;
     let mut work = buf.clone();
 
-    // Both anchors resolve to the same `MOV W0,#0x3E; BL <reset>` shape.
-    let mut call_offs = Vec::new();
-    for anchor in [PATCH12_ANCHOR_LOCKED, PATCH12_ANCHOR_VERIFY] {
-        let (r, str_off) = scan_for(&work, anchor, None);
-        assert_eq!(r, ScanResult::Found, "patch12 anchor string not unique");
-        let (r, adrp_off) = find_adrp_add_targeting(&work, str_off, true);
-        assert_eq!(r, ScanResult::Found, "patch12 anchor xref not unique");
-        assert_eq!(
-            read_instr_u32(&work, adrp_off + 0x10),
-            ARM64_MOV_W0_RESET_REASON,
-            "reset-reason MOV drifted"
-        );
-        call_offs.push(adrp_off + 0x14);
+    let locked_adrp = adrp_for(&work, PATCH12_ANCHOR_LOCKED);
+    let verify_adrp = adrp_for(&work, PATCH12_ANCHOR_VERIFY);
+    let nosupport_adrp = adrp_for(&work, PATCH12_ANCHOR_NO_SUPPORT);
+    let launch_off = nosupport_adrp + 0x70;
+    let spin_off = nosupport_adrp + 0x10;
+
+    // Stock shape: CBZ gate, TBZ status test -> launch, B . spin.
+    let gate_off = locked_adrp - 4;
+    let status_off = locked_adrp + 0x18;
+    let tail_off = status_off + 0x70;
+    assert_eq!(read_instr_u32(&work, gate_off) & 0x7E00_0000, 0x3400_0000);
+    assert_eq!(read_instr_u32(&work, status_off) >> 24, 0xB6); // TBZ bit63
+    assert_eq!(read_instr_u32(&work, tail_off) >> 24, 0xB7); // TBNZ bit63
+    assert_eq!(read_instr_u32(&work, spin_off), 0x1400_0000); // B .
+    for adrp in [locked_adrp, verify_adrp] {
+        assert_eq!(read_instr_u32(&work, adrp + 0x10), ARM64_MOV_W0_RESET_REASON);
     }
 
     use patch_engine::abl_permissive::boot_failure_fallback;
@@ -400,13 +419,21 @@ fn patch12_nops_both_reset_exits_and_is_idempotent() {
         PatchOutcome::Ok
     );
 
-    for off in &call_offs {
+    // Every refusal / spin decision now goes straight to "Launching
+    // fastboot": the orange branch is unreachable.
+    for off in [gate_off, status_off, tail_off] {
         assert_eq!(
-            read_instr_u32(&work, *off),
-            ARM64_NOP,
-            "reset call at 0x{off:x} was not NOPed"
+            b_target(read_instr_u32(&work, off), off),
+            launch_off,
+            "0x{off:x} does not continue to LABEL_342"
         );
     }
+    // The unlock-verify refusal no longer reboots.
+    assert_eq!(read_instr_u32(&work, verify_adrp + 0x14), ARM64_NOP);
+
+    // The reset inside the (now unreachable) refusal block is left in
+    // place; we removed reachability, not the helper.
+    assert_ne!(read_instr_u32(&work, locked_adrp + 0x14), ARM64_NOP);
 
     // The retry-count machinery must be untouched.
     let (r, retry_str) = scan_for(&work, b"A/B retry count NOT decremented", None);

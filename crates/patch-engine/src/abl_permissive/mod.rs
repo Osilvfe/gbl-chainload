@@ -13,10 +13,10 @@
 //!   outbound `androidboot.vbmeta.device_state` always says `locked`
 //!   and the verified-boot color table always answers `green`.
 //! - [`boot_failure_fallback`] — patch12 (optional). Keeps the A/B
-//!   retry counter and slot switching intact, but replaces the two
-//!   "cold-reset instead of fastboot" exits with a fall-through so a
-//!   device with no bootable slot can still reach fastboot.
-
+//!   retry counter and slot switching intact, but routes the
+//!   "cold-reset instead of fastboot" exits so a device with no
+//!   bootable slot can still reach fastboot — while keeping every
+//!   remaining failure path able to reset (no silent spins).
 pub mod libavb_force_success;
 pub mod fastboot_lock_gates;
 pub mod locked_handoff;
