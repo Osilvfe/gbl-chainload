@@ -6,6 +6,7 @@ multicall binary; this script now chains its subcommands:
 
     gbl unwrap <abl.img> <extracted.efi>
     gbl patch  --in <extracted.efi> --out <patched.efi> [--oem ID]
+               [--require-patch11]
     gbl mode2 derive <vbmeta> -o <toml>      (mode 2 only)
     gbl mode2 compile <toml>  -o <profile.bin>
     gbl pack   --cached-abl <patched.efi> --source <abl.img>
@@ -105,6 +106,12 @@ def main():
     ap.add_argument("--stock-vbmeta", help="stock vbmeta image (mode 2 only)")
     ap.add_argument("--oem", help="OEM id for abl-patcher --oem "
                                   "(allowed for any --mode)")
+    ap.add_argument("--experimental-vbmeta-cmdline", action="store_true",
+                    help="deprecated no-op: this edit is now patch11c and "
+                         "is applied automatically")
+    ap.add_argument("--require-patch11", action="store_true",
+                    help="fail unless patch11a/11b/11c all apply "
+                         "(enabled automatically for --mode 2)")
     ap.add_argument("--out", help="output path "
                     "(default: dist/efisp-payload/<abl>-mode<N>.efi)")
     ap.add_argument("--version", action="store_true",
@@ -159,6 +166,10 @@ def main():
         patch_argv = [gbl_bin, "patch", "--in", extracted, "--out", patched]
         if args.oem:
             patch_argv += ["--oem", args.oem]
+        if args.mode == "2" or args.require_patch11:
+            patch_argv += ["--require-patch11"]
+        if args.experimental_vbmeta_cmdline:
+            patch_argv += ["--experimental-vbmeta-cmdline"]
         run(patch_argv, "gbl patch")
 
         # 3. mode 2: derive + compile the mode2 profile via `gbl mode2`.

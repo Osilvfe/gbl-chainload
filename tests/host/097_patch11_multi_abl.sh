@@ -13,6 +13,9 @@
 #        slots repointed at the green string, so every
 #        `*verifiedbootstate` consumer (bootconfig entry, cmdline and
 #        oplusboot mirrors, debug prints) answers "green".
+#   11c  the verification-disabled vbmeta branch in avb_slot_verify is
+#        NOPed so androidboot.vbmeta.{hash_alg,size,digest} is still
+#        published after 11a/11b make userspace expect a verified boot.
 #
 # Unlike patch7, patch11 anchors on AOSP-shared surfaces — it applies to
 # non-oplus (Xiaomi) ABLs too, and that is asserted here.
@@ -82,6 +85,7 @@ for img in "${ALL_ABLS[@]}"; do
   if command -v python3 >/dev/null 2>&1; then
     python3 - "$pe" "$p1" <<'PYEOF'
 import sys
+import struct
 def count(path, pat):
     b = open(path, 'rb').read()
     n, i = 0, 0
@@ -99,9 +103,32 @@ if cp != cc - 1:
     sys.exit(f'FAIL: CSEL word count pristine={cc} patched={cp} (expected -1)')
 if count(patched, mov) <= count(pristine, mov):
     sys.exit('FAIL: patched PE did not gain a MOV x2, x10 word')
+
+# 11c is compiler-layout-tolerant: LDRB stack offset and TBNZ target vary,
+# but the sequence LDRB W8,[SP,#imm]; TBNZ W8,#1; LDR X8,[X23,#0x60]
+# must be unique and the TBNZ must become NOP at the same offset.
+def is_ldrb_w8_sp(w):
+    return (w & 0xffc00000) == 0x39400000 and (w & 0x1f) == 8 and ((w >> 5) & 0x1f) == 31
+def is_tbnz_w8_1(w):
+    return (w & 0x7f800000) == 0x37000000 and (w & 0x1f) == 8 and ((w >> 19) & 0x1f) == 1
+def find_11c(path):
+    b = open(path, 'rb').read()
+    hits = []
+    for off in range(0, len(b) - 11, 4):
+        w0, w1, w2 = struct.unpack_from('<III', b, off)
+        if is_ldrb_w8_sp(w0) and is_tbnz_w8_1(w1) and w2 == 0xf94032e8:
+            hits.append(off)
+    if len(hits) != 1:
+        sys.exit(f'FAIL: 11c site count in {path} = {len(hits)} (expected 1)')
+    return hits[0]
+
+site = find_11c(pristine)
+patched_word = struct.unpack_from('<I', open(patched, 'rb').read(), site + 4)[0]
+if patched_word != 0xd503201f:
+    sys.exit(f'FAIL: 11c branch at 0x{site+4:x} not NOP (word=0x{patched_word:08x})')
 PYEOF
   fi
-  echo "  ok: $name — patch11 applied + idempotent; CSEL rewritten"
+  echo "  ok: $name — patch11 applied + idempotent; 11a/11b/11c rewritten"
 done
 
 if [ "$ran" -eq 0 ]; then

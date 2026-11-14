@@ -11,15 +11,21 @@
 //! - [`locked_handoff`] — patch11 (optional). Bootconfig
 //!   locked-handoff: ABL keeps its real unlocked state internally, but
 //!   outbound `androidboot.vbmeta.device_state` always says `locked`
-//!   and the verified-boot color table always answers `green`.
+//!   and the verified-boot color table always answers `green`. It also
+//!   includes 11c, which publishes `androidboot.vbmeta.*` for a
+//!   verification-disabled top-level vbmeta.
 //! - [`boot_failure_fallback`] — patch12 (optional). Keeps the A/B
 //!   retry counter and slot switching intact, but routes the
 //!   "cold-reset instead of fastboot" exits so a device with no
 //!   bootable slot can still reach fastboot — while keeping every
 //!   remaining failure path able to reset (no silent spins).
+//! [`vbmeta_disabled_cmdline`] is the implementation of patch11c and is
+//! not a separate table entry.
+
 pub mod libavb_force_success;
 pub mod fastboot_lock_gates;
 pub mod locked_handoff;
+pub mod vbmeta_disabled_cmdline;
 pub mod boot_failure_fallback;
 
 use crate::{PatchDesc, PatchScope};

@@ -132,6 +132,28 @@ and does not create one. Historical `v...` tags and b4 checkpoints remain
 available, but do not trigger new releases. Artifact filenames and changelog
 version headings retain their existing version format.
 
+### patch11c — disabled-vbmeta cmdline
+
+patch11 now has three parts: 11a forces the outbound device state to `locked`,
+11b forces every verified-boot color consumer to `green`, and 11c keeps the
+libavb handoff consistent with that spoof. When a top-level vbmeta has
+`AVB_VBMETA_IMAGE_FLAGS_VERIFICATION_DISABLED`, stock libavb deliberately
+omits `androidboot.vbmeta.{hash_alg,size,digest}` and relies on userspace
+seeing `orange`. Once 11a/11b report `green`, fs_avb no longer permits that
+omission and can fail first-stage mount.
+
+11c NOPs the verification-disabled branch so the normal `avb_append_options`
+path publishes the top-level vbmeta digest. The matcher keys off the stable
+`LDR X8,[X23,#0x60]` instruction and accepts compiler-dependent `LDRB`/`TBNZ`
+encodings; all tracked GBL ABLs, including Xiaomi 17 (pudding 44), are covered.
+
+The old `--experimental-vbmeta-cmdline` flag is a deprecated no-op. Mode-2
+packaging automatically passes `--require-patch11`: if 11a/11b/11c do not all
+apply, packaging fails before producing an EFISP. This does not make a mixed
+stock/custom vbmeta chain valid, and it still runs the managed-verity helper
+that the disabled path normally bypasses, so test with `stage`/`oem boot-efi`
+before writing EFISP.
+
 ## GBL FastbootLib boot fixes
 
 `fastboot boot` entered through GBL's own FastbootLib (VolUp) differs from the

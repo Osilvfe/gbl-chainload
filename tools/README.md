@@ -71,6 +71,7 @@ gbl unwrap stock_abl.img extracted.efi
 
 ```
 gbl patch --in <PE> [--out <OUT>] [--check-anchors-only] [--oem <id>]
+          [--require-patch11]
 ```
 
 Drives the same `DynamicPatchLib` Rust code that runs on-device, but
@@ -84,6 +85,11 @@ Flags:
   `none` (no OEM-scoped patches). `oneplus` is accepted as a deprecation
   alias for `oplus` (still maps to `Oem::Oplus`; prints a one-time
   warning; will be removed in a future release).
+- `--require-patch11` — fail unless patch11a/11b/11c all apply. The disabled-
+  vbmeta cmdline edit is now 11c and part of patch11. `efisp-package.py`
+  enables this automatically for mode 2.
+- `--experimental-vbmeta-cmdline` — deprecated no-op retained for script
+  compatibility.
 - `abl_permissive` patches are always applied at host packing time — the
   on-device manifest decides at runtime whether they take effect.
 
@@ -94,6 +100,8 @@ set; the on-device manifest gates execution.
 ```
 gbl patch --check-anchors-only --in extracted.efi
 gbl patch --oem oplus --in extracted.efi --out patched.efi
+gbl patch --oem oplus --require-patch11 \
+          --in extracted.efi --out patched-experimental.efi
 ```
 
 ### `gbl pack`

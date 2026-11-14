@@ -22,7 +22,7 @@
 //!    debug prints) resolves the color name through one 16-byte-stride
 //!    `.data` table: `{0:"green", 1:"orange", 2:"yellow", 3:"red"}`.
 //!
-//! The patch therefore has two halves:
+//! The patch therefore has three halves:
 //!
 //! - **11a — device_state CSEL.** Anchor on the unique
 //!   `androidboot.vbmeta.device_state` string, resolve its unique
@@ -38,10 +38,18 @@
 //!   at the green string. `red` is left intact (it only occurs on
 //!   verification failure, which patch10 already forces to success).
 //!   Idempotent: slots already equal to green satisfy the match.
+//! - **11c — disabled-vbmeta cmdline.** A verification-disabled top-level
+//!   vbmeta normally takes libavb's root-only path and omits
+//!   `androidboot.vbmeta.{hash_alg,size,digest}`. Once 11a/11b report
+//!   `green`, userspace no longer treats that omission as permissive and
+//!   can panic in fs_avb. 11c NOPs the branch so the normal cmdline path
+//!   still publishes the top-level vbmeta digest.
 //!
-//! Both halves must land (or already be applied) for `PATCH_OK`; any
-//! anchor failure is a `MISS` (optional patch — never blocks the
-//! chainload). Multiple table candidates degrade to `AMBIGUOUS`.
+//! All three halves must land (or already be applied) for `PATCH_OK`; any
+//! anchor failure is a `MISS`. The table entry remains optional for
+//! compatibility, while mode-2 host packaging upgrades a miss to a hard
+//! failure with `--require-patch11`. Multiple table candidates degrade to
+//! `AMBIGUOUS`.
 //!
 //! See `docs/project/re-findings.md` § patch11.
 
@@ -49,6 +57,8 @@ use crate::internal::arm64_decode::{decode_adrp_add_regs, find_adrp_add_targetin
 use crate::internal::encode::{read_instr_u32, write_instr_u32};
 use crate::internal::scan::{scan_for, ScanResult};
 use crate::PatchOutcome;
+
+use super::vbmeta_disabled_cmdline;
 
 /// Unique bootconfig key string — the sole producer anchor for 11a.
 const PATCH11_ANCHOR: &[u8] = b"androidboot.vbmeta.device_state";
@@ -83,9 +93,12 @@ const OPERAND_WINDOW: u32 = 0x30;
 pub fn apply(buf: &mut [u8], size: u32) -> PatchOutcome {
     let a = apply_device_state_csel(buf, size);
     let b = apply_color_table_redirect(buf, size);
-    match (a, b) {
-        (PatchOutcome::Ok, PatchOutcome::Ok) => PatchOutcome::Ok,
-        (PatchOutcome::Ambiguous, _) | (_, PatchOutcome::Ambiguous) => PatchOutcome::Ambiguous,
+    let c = vbmeta_disabled_cmdline::apply(buf, size);
+    match (a, b, c) {
+        (PatchOutcome::Ok, PatchOutcome::Ok, PatchOutcome::Ok) => PatchOutcome::Ok,
+        (PatchOutcome::Ambiguous, _, _)
+        | (_, PatchOutcome::Ambiguous, _)
+        | (_, _, PatchOutcome::Ambiguous) => PatchOutcome::Ambiguous,
         _ => PatchOutcome::Miss,
     }
 }

@@ -19,7 +19,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use patch_engine::{
-    abl_permissive::{fastboot_lock_gates, libavb_force_success},
+    abl_permissive::{fastboot_lock_gates, libavb_force_success, vbmeta_disabled_cmdline},
     internal::{
         arm64_decode::find_adrp_add_targeting,
         encode::read_instr_u32,
@@ -27,6 +27,10 @@ use patch_engine::{
     },
     Engine, Oem, PatchOutcome, PatchScope, Worst,
 };
+
+const PATCH14_BRANCH_OFF: u32 = 0x2B1B0; // infiniti-EU-16.0.5.703 fixture
+const PATCH14_TBNZ_W8_1: u32 = 0x3708_07A8;
+const PATCH14_NOP: u32 = 0xD503_201F;
 
 fn repo_root() -> PathBuf {
     // CARGO_MANIFEST_DIR = crates/patch-engine/. Climb two levels to repo root.
@@ -333,6 +337,8 @@ fn patch11_apply_rewrites_csel_and_color_table() {
     let red_ptr = slot(&work, PATCH11_TABLE_OFF + 56);
     let red_off = red_ptr as usize;
     assert_eq!(&work[red_off..red_off + 4], b"red\0");
+    // 11c: disabled-vbmeta branch is now NOP.
+    assert_eq!(read_instr_u32(&work, PATCH14_BRANCH_OFF), PATCH14_NOP);
     // The anchor key string survives (patch must not eat its anchor).
     let (r, _) = scan_for(&work, PATCH11_DEVSTATE_STR, None);
     assert_eq!(r, ScanResult::Found);
@@ -341,6 +347,7 @@ fn patch11_apply_rewrites_csel_and_color_table() {
     assert_eq!(locked_handoff::apply(&mut work, size), PatchOutcome::Ok);
     assert_eq!(read_instr_u32(&work, PATCH11_CSEL_OFF), PATCH11_CSEL_MOV);
     assert_eq!(slot(&work, PATCH11_TABLE_OFF + 24), PATCH11_GREEN_PTR);
+    assert_eq!(read_instr_u32(&work, PATCH14_BRANCH_OFF), PATCH14_NOP);
 }
 
 #[test]
@@ -349,6 +356,54 @@ fn patch11_clean_miss_without_anchor() {
     let size = work.len() as u32;
     use patch_engine::abl_permissive::locked_handoff;
     assert_eq!(locked_handoff::apply(&mut work, size), PatchOutcome::Miss);
+}
+
+// --- patch11c — disabled-vbmeta cmdline ------------------------------
+
+#[test]
+fn patch11c_is_bundled_and_not_a_separate_table_entry() {
+    assert!(
+        !patch_engine::abl_permissive::ABL_PERMISSIVE_PATCHES
+            .iter()
+            .any(|p| p.name.contains("patch14")),
+        "patch11c must not be a separate patch14 table entry"
+    );
+}
+
+#[test]
+fn patch11c_rewrites_disabled_vbmeta_branch_and_is_idempotent() {
+    let buf = match infiniti_pe() {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP: patch11c — fixture missing");
+            return;
+        }
+    };
+    let size = buf.len() as u32;
+    let mut work = buf.clone();
+
+    assert_eq!(read_instr_u32(&work, PATCH14_BRANCH_OFF), PATCH14_TBNZ_W8_1);
+    assert_eq!(
+        vbmeta_disabled_cmdline::apply(&mut work, size),
+        PatchOutcome::Ok
+    );
+    assert_eq!(read_instr_u32(&work, PATCH14_BRANCH_OFF), PATCH14_NOP);
+
+    assert_eq!(
+        vbmeta_disabled_cmdline::apply(&mut work, size),
+        PatchOutcome::Ok
+    );
+    assert_eq!(read_instr_u32(&work, PATCH14_BRANCH_OFF), PATCH14_NOP);
+}
+
+#[test]
+fn patch11c_clean_miss_on_zero_buffer() {
+    let mut work = vec![0u8; 4096];
+    let size = work.len() as u32;
+    assert_eq!(
+        vbmeta_disabled_cmdline::apply(&mut work, size),
+        PatchOutcome::Miss
+    );
 }
 
 // --- patch12 — boot-failure fallback (v3: orange branch disabled) -----

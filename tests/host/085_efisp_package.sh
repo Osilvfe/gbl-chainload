@@ -117,6 +117,20 @@ python3 scripts/efisp-package.py \
   >/dev/null 2>&1 \
   && { echo "FAIL: mode 2 accepted without --stock-vbmeta"; exit 1; } || true
 
+# mode 2 success — stock-vbmeta profile + strict patch11 bundle.
+VBMETA=tests/images/vbmeta-infiniti-IN-16.0.7.201.img
+if [ -f "$VBMETA" ]; then
+  python3 scripts/efisp-package.py \
+    --abl "$ABL" --mode 2 --efi "$OUT/base.efi" --stock-vbmeta "$VBMETA" \
+    --oem oplus --tools-dir "$OUT/tools" --out "$OUT/mode2.efi" \
+    >"$OUT/m2.log" 2>&1 \
+    || { echo "FAIL: efisp-package.py mode 2 failed"; cat "$OUT/m2.log"; exit 1; }
+  "$H" scan-cached-abl "$OUT/mode2.efi" | grep -q 'status=0' \
+    || { echo "FAIL: mode-2 output has no locatable cached-ABL overlay"; exit 1; }
+  assert_argv "$OUT/patch.argv" "--require-patch11" "mode 2 strict patch11"
+  assert_argv "$OUT/pack.argv" "0x02" "mode 2 pack manifest bits"
+fi
+
 # pre-flight gate: --stock-vbmeta on mode 1 must abort non-zero.
 python3 scripts/efisp-package.py \
   --abl "$ABL" --mode 1 --efi "$OUT/base.efi" --stock-vbmeta "$ABL" \

@@ -9,11 +9,13 @@
 //! - `--check-anchors-only` re-uses the engine's apply loop and only
 //!   surfaces a mandatory miss (matching the C source comment about
 //!   AMBIGUOUS/MISS being lumped together).
+//! - `--require-patch11` upgrades a patch11 miss to a mandatory failure;
+//!   mode-2 packaging uses it because 11c is required for custom ROMs.
 
 use std::path::PathBuf;
 
 use clap::Parser;
-use patch_engine::{Engine, Oem, Worst};
+use patch_engine::{abl_permissive::locked_handoff, Engine, Oem, PatchOutcome, Worst};
 
 use super::{slurp, GblError};
 
@@ -33,6 +35,14 @@ pub struct Args {
     /// deprecation alias; `none` skips OEM patches.
     #[arg(long, value_name = "ID")]
     oem: Option<String>,
+    /// Deprecated no-op: the disabled-vbmeta cmdline edit is now part of
+    /// patch11 (subpatch 11c) and is always applied.
+    #[arg(long, hide = true)]
+    experimental_vbmeta_cmdline: bool,
+    /// Fail the build unless all three patch11 halves (11a/11b/11c) apply.
+    /// Custom-ROM (mode 2) packaging enables this automatically.
+    #[arg(long)]
+    require_patch11: bool,
 }
 
 pub fn run(args: Args) -> Result<(), GblError> {
@@ -60,7 +70,30 @@ pub fn run(args: Args) -> Result<(), GblError> {
 
     let mut buf = slurp(&args.r#in)?;
     let sz = buf.len();
-    let result = engine.apply(&mut buf);
+    let mut result = engine.apply(&mut buf);
+
+    if args.experimental_vbmeta_cmdline {
+        eprintln!(
+            "abl-patcher: --experimental-vbmeta-cmdline is deprecated and \
+             no longer needed; patch11c is included in patch11"
+        );
+    }
+
+    if args.require_patch11 {
+        let outcome = locked_handoff::apply(&mut buf, sz as u32);
+        let outcome_name = match outcome {
+            PatchOutcome::Ok => "OK",
+            PatchOutcome::Miss => "MISS",
+            PatchOutcome::Ambiguous => "AMBIGUOUS",
+        };
+        eprintln!(
+            "DynamicPatch: patch11-required-custom-rom \
+             [abl-permissive, mandatory] -> {outcome_name}"
+        );
+        if outcome != PatchOutcome::Ok {
+            result.worst = Worst::MandatoryMiss;
+        }
+    }
 
     // Aggregate line — byte-for-byte match abl-patcher.c.
     eprintln!(
