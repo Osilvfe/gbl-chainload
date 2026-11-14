@@ -64,16 +64,16 @@ Evidence to preserve:
 - QSEE/KM call-slot mapping and SPSS/Secretkeeper follow-ups were investigated enough to guide mode-2 planning, but mode-2 still needs profile lifecycle work before it becomes a usable mode.
 - Preserve future notes as profile evidence: command IDs, payload shapes, and OTA/profile coupling should be stored here instead of in session transcripts.
 
-## Device: macan / sm8845 (OnePlus 15R ≈ OnePlus Ace 6T)
+## Device: macan (OnePlus 15R ≈ OnePlus Ace 6T)
 
 Source: mode-0 diag bundle `gbl-chainload-diag-20260604-000513` (slot a active, recovery boot). Identity is from hard partition/firmware evidence, not recovery props:
 
-- ABL string `OPLUS SM8845 Attestation`; `ro.board.platform=sm8845`; `ro.product.device=macan`; `ro.product.model=OnePlus 15R`; SoC internal `Molokai`/`Kaanapali`; OEM ID `0x51`. (The phone was labelled "Ace 6T / canoe / sm8850" — the bundle is unambiguously **macan / sm8845**; Ace 6T is the CN marketing name for the macan device, canoe/sm8850 is a different SoC.)
+- ABL string `OPLUS SM8845 Attestation`; `ro.board.platform=sm8845`; `ro.product.device=macan`; `ro.product.model=OnePlus 15R`; SoC internal `Molokai`/`Kaanapali`; OEM ID `0x51`. The bundle is **macan** (Ace 6T is its CN marketing name). The `sm8845` string is an ODM/platform label, **not** a different die: per project owner the hardware is the sm8850 family, the same one fairlady runs (`soc PfId=0x294`, `Soc=0x20000`). Do not derive per-SoC behaviour from this string — see the `0x203` note below.
 - The build still bakes `-DPRODUCT_NAME="canoe"` (dev-project label, cosmetic getvar string). Not load-bearing; left as-is.
 
 ### KM device-state RPMB persistence — mode-1 brick path (FIXED)
 
-macan issues an **OEM-added** KM command `WRITE_KM_DEVICE_STATE` (cmd `0x203`, `KEYMASTER_UTILS_CMD_ID + 3`) that is **absent from the open QcomModulePkg BSP** (only the enum exists; no caller). The BSP `KeyMasterSetRotAndBootState` sends only SET_ROT (`0x201`) + SET_BOOT_STATE (`0x208`) and never calls `0x203`, so the RoT/boot-state sends do **not** themselves persist.
+OPPO's ABL issues KM `WRITE_KM_DEVICE_STATE` (cmd `0x203`, `KEYMASTER_UTILS_CMD_ID + 3`). The open QcomModulePkg BSP carries only the enum (`edk2/QcomModulePkg/Library/avb/KeymasterClient.c:103`), never a caller: the BSP `KeyMasterSetRotAndBootState` sends only SET_ROT (`0x201`) + SET_BOOT_STATE (`0x208`), so those sends do **not** themselves persist. This is **OEM-side behaviour, not a macan/sm8845 quirk** — fairlady (PLZ110, sm8850) issues `0x203` on every boot too (our own hook decodes it: `qsee-km | cmd=0x00000203(WRITE_KM_DEVICE_STATE)` in the logfs capture). With fakelock off it simply persists the honest unlocked state, which is why it was never noticed there.
 
 **Evidence basis (read this before trusting the mechanism).** The primary capture is a *mode-0* bundle, so mode-1 behavior on macan is **not directly observed**. The fix instead rests on a controlled comparison with the project's own *validated* mode-1 capture on infiniti (`logs/20260524-012314_manual_mode-1-v2.3.4-installed`):
 

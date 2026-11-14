@@ -41,8 +41,10 @@
 
     KM cmd 0x203 (WRITE_KM_DEVICE_STATE)  — DROP: the send buffer carries only a
         pointer ({cmd, addr_lo, addr_hi}) to an opaque KM device-state struct we
-        have no ground truth for (infiniti never issues 0x203), so it cannot be
-        safely healed today; refuse it. RE follow-up to recover the pointee
+        have no decoded layout for, so it cannot be safely healed today; refuse
+        it. The command itself is not device-specific: OPPO's ABL issues it on
+        the sm8850 family (fairlady included), it is only the open BSP that has
+        no caller. RE follow-up to recover the pointee
         layout so it can be healed instead of dropped — see
         docs/project/re-findings.md "Device: macan / sm8845".
         (FakelockOverlay_ShouldDropKmDeviceStateWrite.)

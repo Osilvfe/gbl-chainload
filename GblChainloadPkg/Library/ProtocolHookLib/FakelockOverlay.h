@@ -58,9 +58,10 @@ FakelockOverlay_ShouldDropQseeOplusSec (
   OUT EFI_STATUS  *FakeStatus
   );
 
-/** Fakelock policy for KeyMaster cmd 0x203 WRITE_KM_DEVICE_STATE. This OEM-added
-    KM command (not present in the open QcomModulePkg BSP) persists KeyMaster
-    device-state to RPMB; macan/sm8845 routes lock-state through it. Returns TRUE
+/** Fakelock policy for KeyMaster cmd 0x203 WRITE_KM_DEVICE_STATE. This OEM-side
+    KM command (enum only in the open QcomModulePkg BSP, no caller) persists
+    KeyMaster device-state to RPMB; OPPO's ABL issues it on the sm8850 family.
+    Returns TRUE
     + EFI_SUCCESS to swallow the persist so a spoofed locked RoT/boot-state can
     never reach RPMB. The current-boot attestation context (already set via
     SET_ROT / SET_BOOT_STATE) is unaffected — only the RPMB commit is dropped.
