@@ -45,6 +45,8 @@ enum Cli {
     /// Apply the host patch table to an ABL PE
     /// (former `abl-patcher`; NO `--no-mode1` post-PR1).
     Patch(commands::patch::Args),
+    /// Read/write A/B slot attributes in the GPT (boot_a/boot_b)
+    Slot(commands::slot::Args),
     /// Pack a GBLP1 v1 container (former `gbl-pack`).
     Pack(commands::pack::Args),
     /// Inspect a GBLP1 v1 container (former `gblp1-inspect`).
@@ -61,6 +63,7 @@ fn main() -> std::process::ExitCode {
         Cli::Commit(args) => commands::commit::run(args),
         Cli::Unwrap(args) => commands::unwrap::run(args),
         Cli::Patch(args) => commands::patch::run(args),
+        Cli::Slot(args) => commands::slot::run(args),
         Cli::Pack(args) => commands::pack::run(args),
         Cli::Inspect(args) => commands::inspect::run(args),
         Cli::Mode2(args) => commands::mode2::run(args),

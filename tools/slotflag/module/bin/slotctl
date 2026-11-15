@@ -1,0 +1,68 @@
+#!/system/bin/sh
+# slotctl — stable wrapper around `gbl slot` for the WebUI and for manual use.
+#
+# Everything the WebUI needs goes through this file so the HTML stays dumb:
+# paths are fixed here, the backup directory is created on demand, and every
+# command answers with `key=value` lines.
+set -u
+
+MODDIR=${0%/*}
+BIN="$MODDIR/gbl"
+BAK=/data/adb/gbl-slotflag/backup
+
+fail() {
+  echo "error=$*"
+  exit 1
+}
+
+[ -x "$BIN" ] || fail "gbl missing at $BIN"
+
+# The backup directory is only needed for backup/restore; a read or a plain
+# attribute write must still work if /data is not writable for some reason.
+BAK_OK=1
+mkdir -p "$BAK" 2>/dev/null || BAK_OK=0
+
+cmd=${1:-state}
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  state)
+    out=$("$BIN" slot show "$@" 2>&1) || { echo "$out"; exit 1; }
+    echo "backup_dir=$BAK"
+    echo "backup_ready=$BAK_OK"
+    echo "$out"
+    ;;
+  set)
+    "$BIN" slot set "$@" 2>&1
+    exit $?
+    ;;
+  backup)
+    [ "$BAK_OK" = 1 ] || fail "cannot create $BAK (root required)"
+    ts=$(date +%Y%m%d-%H%M%S 2>/dev/null || echo unknown)
+    f="$BAK/gpt-$ts.bin"
+    out=$("$BIN" slot backup --out "$f" 2>&1) || { echo "$out"; exit 1; }
+    [ -f "$f" ] || fail "backup produced no file"
+    echo "path=$f"
+    echo "size=$(wc -c <"$f" 2>/dev/null | tr -d ' ')"
+    ;;
+  backups)
+    # newest first; may be empty
+    [ "$BAK_OK" = 1 ] || exit 0
+    ls -1t "$BAK"/*.bin 2>/dev/null | head -20
+    ;;
+  restore)
+    [ "$BAK_OK" = 1 ] || fail "cannot create $BAK (root required)"
+    f=${1:-}
+    if [ -z "$f" ]; then
+      f=$(ls -1t "$BAK"/*.bin 2>/dev/null | head -1)
+    fi
+    [ -n "$f" ] || fail "no backup found in $BAK"
+    [ -f "$f" ] || fail "no such file: $f"
+    out=$("$BIN" slot restore --in "$f" 2>&1) || { echo "$out"; exit 1; }
+    echo "$out"
+    echo "path=$f"
+    ;;
+  *)
+    fail "unknown command: $cmd (state|set|backup|backups|restore)"
+    ;;
+esac

@@ -10,6 +10,7 @@ pub mod inspect;
 pub mod mode2;
 pub mod pack;
 pub mod patch;
+pub mod slot;
 pub mod unwrap;
 
 /// Shared error type for every subcommand.

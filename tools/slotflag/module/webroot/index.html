@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>GBL Slot Flag</title>
+<style>
+  :root{
+    --bg:#0b0d10; --card:#151a21; --card2:#1d232c; --line:#2b333f;
+    --fg:#e8eef6; --dim:#8b98a8; --acc:#4da3ff;
+    --ok:#3ddc97; --warn:#ffb020; --bad:#ff5f56;
+  }
+  @media (prefers-color-scheme: light){
+    :root{--bg:#f2f5f9;--card:#fff;--card2:#eef2f7;--line:#d7dee7;
+          --fg:#161b22;--dim:#5d6b7a;--acc:#0b62c4;}
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:var(--bg);color:var(--fg);padding:14px;
+       font:14px/1.5 -apple-system,Roboto,"Segoe UI",sans-serif;
+       padding-bottom:calc(20px + env(safe-area-inset-bottom))}
+  header{display:flex;align-items:baseline;gap:8px;margin-bottom:2px}
+  h1{font-size:17px;margin:0;letter-spacing:.2px}
+  .src{font:11px ui-monospace,monospace;color:var(--dim)}
+  .sub{color:var(--dim);font:11.5px/1.45 ui-monospace,monospace;margin-top:2px;
+       word-break:break-all}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+        padding:14px;margin-top:12px}
+  .card h2{margin:0 0 10px;font-size:14px;display:flex;align-items:center;gap:8px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:0 0 auto}
+  .dot.bad{background:var(--bad)}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+  .chip{font:11px/1 ui-monospace,monospace;padding:5px 8px;border-radius:99px;
+        border:1px solid var(--line);color:var(--dim);background:var(--card2)}
+  .chip.on{color:#06121f;background:var(--ok);border-color:transparent;font-weight:700}
+  .chip.warn{color:#201500;background:var(--warn);border-color:transparent;font-weight:700}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:10px;
+       padding:9px 0;border-top:1px solid var(--line)}
+  .row:first-of-type{border-top:0}
+  .row .lbl{font-size:13px}
+  .row .lbl small{display:block;color:var(--dim);font-size:11px;font-weight:400}
+  .sw{position:relative;width:46px;height:26px;flex:0 0 auto}
+  .sw input{position:absolute;inset:0;opacity:0;margin:0;width:100%;height:100%}
+  .sw i{position:absolute;inset:0;border-radius:99px;background:#3a4553;
+        transition:.15s;pointer-events:none}
+  .sw i:after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;
+              border-radius:50%;background:#fff;transition:.15s}
+  .sw input:checked+i{background:var(--acc)}
+  .sw input:checked+i:after{transform:translateX(20px)}
+  .sw.bad input:checked+i{background:var(--bad)}
+  .sw input:disabled+i{opacity:.45}
+  input[type=number]{width:64px;background:var(--card2);color:var(--fg);
+    border:1px solid var(--line);border-radius:8px;padding:6px 8px;
+    font:13px ui-monospace,monospace;text-align:center}
+  input[type=number]:disabled{opacity:.45}
+  .bar{display:flex;gap:8px;margin-top:12px}
+  .bar button{flex:1}
+  button{font:13px inherit;border-radius:10px;border:1px solid var(--line);
+         background:var(--card2);color:var(--fg);padding:10px 12px;cursor:pointer}
+  button:disabled{opacity:.4}
+  button.primary{background:var(--acc);color:#04101f;border-color:transparent;
+                 font-weight:700}
+  button.ghost{background:transparent}
+  button.danger{background:var(--bad);color:#fff;border-color:transparent;font-weight:700}
+  pre{background:var(--card2);border:1px solid var(--line);border-radius:10px;
+      padding:10px;font:11px/1.45 ui-monospace,monospace;color:var(--fg);
+      overflow:auto;max-height:240px;white-space:pre-wrap;word-break:break-word;
+      margin:10px 0 0}
+  .note{color:var(--dim);font-size:11.5px;margin-top:10px}
+  .banner{border-radius:12px;padding:10px 12px;font-size:12px;margin-top:12px;
+          background:rgba(255,95,86,.14);border:1px solid rgba(255,95,86,.4);
+          color:#ffb4b0}
+  .banner.warn{background:rgba(255,176,32,.14);border-color:rgba(255,176,32,.45);
+               color:#ffd591}
+  .banner.ok{background:rgba(61,220,151,.14);border-color:rgba(61,220,151,.45);
+             color:#8ff0c4}
+  @media (prefers-color-scheme: light){
+    .banner{color:#8a1c17}.banner.warn{color:#6b4400}.banner.ok{color:#0a5c3c}
+  }
+  .sheet{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;
+         align-items:flex-end;z-index:20}
+  .sheet.open{display:flex}
+  .sheet .panel{background:var(--card);border-radius:16px 16px 0 0;width:100%;
+                padding:18px 16px calc(18px + env(safe-area-inset-bottom));
+                border-top:1px solid var(--line)}
+  .sheet p{margin:0 0 10px;font-size:13px;color:var(--fg)}
+  .sheet p.muted{color:var(--dim);font-size:12px}
+  .sheet .acts{display:flex;gap:8px;margin-top:14px}
+  .sheet .acts button{flex:1}
+  .hidden{display:none!important}
+  .list{max-height:150px;overflow:auto;font:11px/1.6 ui-monospace,monospace}
+  .list div{padding:4px 6px;border-radius:6px}
+  .list div.sel{background:var(--card2)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>GBL Slot Flag</h1>
+  <span class="src" id="src"></span>
+</header>
+<div class="sub" id="disk">loading…</div>
+
+<div id="banners"></div>
+
+<div class="card" id="card-a"></div>
+<div class="card" id="card-b"></div>
+
+<div class="bar">
+  <button class="ghost" id="btn-refresh">Refresh</button>
+  <button class="ghost" id="btn-backup">Backup GPT</button>
+</div>
+<div class="bar">
+  <button class="ghost" id="btn-restore">Restore…</button>
+  <button class="ghost" id="btn-log">Show log</button>
+</div>
+
+<div class="note">
+  Attrs live in the GPT entries of <code>boot_a</code>/<code>boot_b</code>
+  (bit48-49 priority, 50 active, 51-53 retry, 54 successful, 55 unbootable).
+  Writing does what ABL's <code>UpdatePartitionAttributes</code> does: both the
+  primary and the backup GPT are rewritten with fresh CRCs.
+</div>
+
+<pre id="log" class="hidden"></pre>
+
+<div class="sheet" id="sheet">
+  <div class="panel">
+    <p><strong>Mark slot <span id="sh-slot"></span> unbootable?</strong></p>
+    <p class="muted">ABL will skip this slot on the next boot and try the
+      other one. This is the state patch13 is meant to neutralise: if patch13
+      is not active, only fastboot gets you back.</p>
+    <p class="muted">Other slot: <code id="sh-other"></code></p>
+    <div class="acts">
+      <button id="sh-cancel">Cancel</button>
+      <button class="danger" id="sh-ok">Set unbootable</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="sheet-restore">
+  <div class="panel">
+    <p><strong>Restore GPT from backup</strong></p>
+    <p class="muted" id="rs-dir"></p>
+    <div class="list" id="rs-list"></div>
+    <div class="acts">
+      <button id="rs-cancel">Cancel</button>
+      <button class="danger" id="rs-ok" disabled>Restore</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var MOD = "/data/adb/modules/gbl-slotflag";
+  var CTL = MOD + "/bin/slotctl";
+
+  var state = { a: null, b: null };
+  var draft = { a: {}, b: {} };
+  var backupDir = "";
+  var busy = false;
+
+  /* ---------- KernelSU bridge -------------------------------------- */
+
+  function ksuAvailable() {
+    return typeof window.ksu !== "undefined" && window.ksu &&
+           typeof window.ksu.exec === "function";
+  }
+
+  /* Native `ksu.exec` is callback based:
+   *
+   *     ksu.exec(command, JSON.stringify(options), callbackName)
+   *
+   * where `callbackName` is the *name of a global function* that the manager
+   * later invokes as `window[callbackName](errno, stdout, stderr)`. That is
+   * exactly what the official `kernelsu` npm helper does, and the only
+   * supported calling convention: passing an options object in the second
+   * position (or omitting the callback) makes the manager inject
+   * `undefined(0, …)` and the call silently returns nothing.
+   *
+   * We inline the helper instead of importing `kernelsu` so the page stays a
+   * single asset with no build step. */
+  var cbCounter = 0;
+
+  function execCmd(cmd, timeoutMs) {
+    if (!ksuAvailable()) return Promise.reject(new Error("KernelSU API not available"));
+    var limit = timeoutMs || 30000;
+
+    return new Promise(function (resolve, reject) {
+      var name = "__gblslot_cb_" + Date.now() + "_" + (cbCounter++);
+      var settled = false;
+
+      function cleanup() {
+        try { delete window[name]; } catch (e) { /* ignore */ }
+      }
+
+      var timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error("ksu.exec timed out after " + limit + " ms: " + cmd));
+      }, limit);
+
+      window[name] = function (errno, stdout, stderr) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        cleanup();
+        resolve({
+          errno: typeof errno === "number" ? errno : 0,
+          stdout: stdout == null ? "" : String(stdout),
+          stderr: stderr == null ? "" : String(stderr)
+        });
+      };
+
+      try {
+        window.ksu.exec(cmd, JSON.stringify({}), name);
+      } catch (e) {
+        settled = true;
+        clearTimeout(timer);
+        cleanup();
+        reject(e);
+      }
+    });
+  }
+
+  /* Serialise every call: overlapping exec()s interleave their output on some
+     manager builds, and the manager injects one script per call. */
+  var chain = Promise.resolve();
+  function run(cmd, timeoutMs) {
+    var next = chain.then(function () { return execCmd(cmd, timeoutMs); });
+    chain = next.then(function () {}, function () {});
+    return next;
+  }
+
+  /* A non-zero errno usually still carries a usable `error=` line (slotctl
+     exits 1 on failure and explains why), so keep stdout as the source of
+     truth and only synthesise a message when it is empty. */
+  function failure(res) {
+    var o = kv(res.stdout);
+    if (o.error) return o.error;
+    var err = (res.stderr || "").trim();
+    if (err) return err;
+    if (res.errno) return "command failed (errno " + res.errno + ")";
+    return "command failed";
+  }
+
+  function parse(res) {
+    var o = kv(res.stdout);
+    if (!o.error && res.errno) o.error = failure(res);
+    return o;
+  }
+
+  function kv(text) {
+    var out = {};
+    String(text || "").split(/\r?\n/).forEach(function (line) {
+      var i = line.indexOf("=");
+      if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    });
+    return out;
+  }
+
+  /* ---------- DOM helpers ------------------------------------------ */
+
+  function $(id) { return document.getElementById(id); }
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+
+  function setLog(text) {
+    $("log").textContent = text;
+  }
+
+  /* Two layers: `flash` carries the result of the last action and survives a
+     refresh; the derived warning underneath reflects the current state. */
+  var flash = { kind: "", text: "" };
+
+  function setFlash(kind, text) {
+    flash.kind = kind || "";
+    flash.text = text || "";
+    paintBanners();
+  }
+
+  function paintBanners() {
+    var box = $("banners");
+    box.innerHTML = "";
+    if (flash.text) {
+      box.appendChild(el("div", "banner" + (flash.kind ? " " + flash.kind : ""),
+                         flash.text));
+      return;
+    }
+    if (!state.a || !state.b) return;
+    var both = cur("a", "unbootable") === "1" && cur("b", "unbootable") === "1";
+    if (both) {
+      box.appendChild(el("div", "banner",
+        "Both slots would be unbootable. The tool refuses unless you force it — " +
+        "that is the state stock ABL cannot leave."));
+    }
+  }
+
+  function fmtAttr(v) {
+    if (!v) return "—";
+    return v;
+  }
+
+  /* ---------- render ----------------------------------------------- */
+
+  function cur(slot, key) {
+    return (key in draft[slot]) ? draft[slot][key] : state[slot][key];
+  }
+
+  function isDirty(slot) {
+    return Object.keys(draft[slot]).length > 0;
+  }
+
+  function chip(text, cls) { return el("span", "chip" + (cls ? " " + cls : ""), text); }
+
+  function paintChips(slot) {
+    var card = $("card-" + slot);
+    var box = card.querySelector(".chips");
+    if (!box) return;
+    box.innerHTML = "";
+
+    var prio = cur(slot, "priority");
+    var act = cur(slot, "active");
+    var retry = cur(slot, "retry");
+    var succ = cur(slot, "successful");
+    var unb = cur(slot, "unbootable");
+
+    box.appendChild(chip("PRIO " + prio, prio !== "0" ? "on" : ""));
+    box.appendChild(chip(act === "1" ? "ACTIVE" : "INACTIVE", act === "1" ? "on" : ""));
+    box.appendChild(chip("RETRY " + retry + "/7"));
+    box.appendChild(chip(succ === "1" ? "SUCCESSFUL" : "NO-SUCCESS", succ === "1" ? "on" : ""));
+    box.appendChild(chip(unb === "1" ? "UNBOOTABLE" : "BOOTABLE",
+                         unb === "1" ? "warn" : "on"));
+
+    var dot = card.querySelector(".dot");
+    if (dot) dot.className = "dot" + (unb === "1" ? " bad" : "");
+  }
+
+  function sw(slot, key, danger) {
+    var wrap = el("div", "sw" + (danger ? " bad" : ""));
+    var input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = cur(slot, key) === "1";
+    input.addEventListener("change", function () {
+      draft[slot][key] = input.checked ? "1" : "0";
+      setFlash("", "");
+      paintChips(slot);
+      syncButtons();
+    });
+    wrap.appendChild(input);
+    wrap.appendChild(el("i"));
+    return wrap;
+  }
+
+  function num(slot, key, min, max) {
+    var input = document.createElement("input");
+    input.type = "number";
+    input.min = min; input.max = max;
+    input.value = cur(slot, key);
+    input.addEventListener("change", function () {
+      var v = parseInt(input.value, 10);
+      if (isNaN(v)) v = parseInt(cur(slot, key), 10) || 0;
+      if (v < min) v = min;
+      if (v > max) v = max;
+      input.value = v;
+      draft[slot][key] = String(v);
+      paintChips(slot);
+      syncButtons();
+    });
+    return input;
+  }
+
+  function row(label, hint, control) {
+    var r = el("div", "row");
+    var l = el("div", "lbl");
+    l.appendChild(document.createTextNode(label));
+    if (hint) l.appendChild(el("small", null, hint));
+    r.appendChild(l);
+    r.appendChild(control);
+    return r;
+  }
+
+  function renderSlot(slot) {
+    var card = $("card-" + slot);
+    card.innerHTML = "";
+    if (!state[slot]) return;
+
+    var head = el("h2");
+    head.appendChild(el("span", "dot"));
+    head.appendChild(document.createTextNode("boot_" + slot));
+    card.appendChild(head);
+
+    var chips = el("div", "chips");
+    card.appendChild(chips);
+
+    card.appendChild(row("Unbootable", "bit 55 — ABL refuses to boot this slot",
+                         sw(slot, "unbootable", true)));
+    card.appendChild(row("Successful", "bit 54 — last boot completed",
+                         sw(slot, "successful", false)));
+    card.appendChild(row("Active", "bit 50",
+                         sw(slot, "active", false)));
+    card.appendChild(row("Priority", "0–3, bits 48–49", num(slot, "priority", 0, 3)));
+    card.appendChild(row("Retry count", "0–7, bits 51–53", num(slot, "retry", 0, 7)));
+
+    var bar = el("div", "bar");
+    var apply = el("button", "primary");
+    apply.id = "apply-" + slot;
+    apply.textContent = "Apply to slot " + slot;
+    apply.disabled = true;
+    apply.addEventListener("click", function () { applySlot(slot); });
+
+    var reset = el("button", "ghost");
+    reset.textContent = "Reset";
+    reset.addEventListener("click", function () {
+      draft[slot] = {};
+      setFlash("", "");
+      renderSlot(slot);
+      syncButtons();
+    });
+
+    bar.appendChild(apply);
+    bar.appendChild(reset);
+    card.appendChild(bar);
+
+    paintChips(slot);
+  }
+
+  function syncInputs() {
+    Array.prototype.forEach.call(
+      document.querySelectorAll(
+        ".card .sw input, .card input[type=number], .card .bar button.ghost"),
+      function (i) { i.disabled = busy; });
+  }
+
+  function syncButtons() {
+    ["a", "b"].forEach(function (s) {
+      var b = $("apply-" + s);
+      if (b) b.disabled = busy || !isDirty(s) || !state[s];
+    });
+    $("btn-refresh").disabled = busy;
+    $("btn-backup").disabled = busy;
+    $("btn-restore").disabled = busy;
+    syncInputs();
+  }
+
+  /* ---------- read ------------------------------------------------ */
+
+  function refresh() {
+    busy = true;
+    syncButtons();
+    $("disk").textContent = "reading…";
+
+    return run(CTL + " state").then(function (r) {
+      var o = parse(r);
+      setLog(r.stdout + (r.stderr ? "\n[stderr]\n" + r.stderr : ""));
+
+      if (o.error || o.crc !== "ok") {
+        state.a = state.b = null;
+        $("src").textContent = "";
+        $("disk").textContent = "GPT unreadable";
+        $("card-a").innerHTML = "";
+        $("card-b").innerHTML = "";
+        setFlash("", o.error || "GPT validation failed — refusing to show data");
+        busy = false;
+        syncButtons();
+        return;
+      }
+
+      backupDir = o.backup_dir || "";
+      $("src").textContent = "live GPT";
+      $("disk").textContent = (o.disk || "?") + " · " + (o.lba || "?") +
+                              "B sectors · " + (o.entries || "?") + " entries · CRC ok";
+
+      ["a", "b"].forEach(function (s) {
+        if (!(s + ".attr" in o)) {
+          state[s] = null;
+          $("card-" + s).innerHTML = "";
+          return;
+        }
+        state[s] = {
+          attr: o[s + ".attr"],
+          priority: o[s + ".priority"],
+          active: o[s + ".active"],
+          retry: o[s + ".retry"],
+          successful: o[s + ".successful"],
+          unbootable: o[s + ".unbootable"]
+        };
+        draft[s] = {};
+        renderSlot(s);
+      });
+
+      paintBanners();
+      busy = false;
+      syncButtons();
+    }).catch(function (e) {
+      busy = false;
+      $("disk").textContent = "error";
+      setFlash("", e.message || String(e));
+      syncButtons();
+    });
+  }
+
+  /* ---------- write ----------------------------------------------- */
+
+  function argsFor(slot) {
+    var names = {
+      unbootable: "--unbootable", successful: "--successful",
+      active: "--active", priority: "--priority", retry: "--retry"
+    };
+    return Object.keys(draft[slot]).map(function (k) {
+      return names[k] + " " + draft[slot][k];
+    }).join(" ");
+  }
+
+  function applySlot(slot) {
+    if (busy || !isDirty(slot)) return;
+    var args = argsFor(slot);
+    if (draft[slot].unbootable === "1") {
+      $("sh-slot").textContent = slot;
+      var other = slot === "a" ? "b" : "a";
+      $("sh-other").textContent = "boot_" + other +
+        " unbootable=" + cur(other, "unbootable") +
+        ", successful=" + cur(other, "successful");
+      $("sh-ok").onclick = function () {
+        closeSheet("sheet");
+        write(slot, args);
+      };
+      $("sheet").classList.add("open");
+      return;
+    }
+    write(slot, args);
+  }
+
+  function write(slot, args) {
+    var outcome = null;
+    busy = true;
+    syncButtons();
+    var btn = $("apply-" + slot);
+    if (btn) btn.textContent = "writing…";
+
+    return run(CTL + " set --slot " + slot + " " + args).then(function (r) {
+      setLog(r.stdout + (r.stderr ? "\n[stderr]\n" + r.stderr : ""));
+      var o = parse(r);
+
+      if (o.error) {
+        outcome = { kind: "", text: o.error };
+      } else if (o.result === "ok") {
+        outcome = { kind: "ok", text: "Written. " + (o.old || "?") + " → " +
+                    (o.new || "?") + ". Reboot for ABL to act on it." };
+      } else if (o.result === "unchanged") {
+        outcome = { kind: "warn", text: "Nothing changed." };
+      } else if (o.result === "dry-run") {
+        outcome = { kind: "warn", text: "Dry run: " + (o.old || "?") + " → " +
+                    (o.new || "?") };
+      }
+    }).catch(function (e) {
+      outcome = { kind: "", text: e.message || String(e) };
+    }).then(function () {
+      busy = false;
+      return refresh();
+    }).then(function () {
+      if (outcome) setFlash(outcome.kind, outcome.text);
+    });
+  }
+
+  /* ---------- backup / restore ------------------------------------ */
+
+  function doBackup() {
+    if (busy) return;
+    var outcome = null;
+    busy = true;
+    syncButtons();
+    return run(CTL + " backup").then(function (r) {
+      setLog(r.stdout + (r.stderr ? "\n[stderr]\n" + r.stderr : ""));
+      var o = parse(r);
+      if (o.error) outcome = { kind: "", text: o.error };
+      else outcome = { kind: "ok", text: "Saved " + (o.path || "?") +
+                        (o.size ? " (" + o.size + " bytes)" : "") };
+    }).catch(function (e) {
+      outcome = { kind: "", text: e.message || String(e) };
+    }).then(function () {
+      busy = false;
+      syncButtons();
+      if (outcome) setFlash(outcome.kind, outcome.text);
+    });
+  }
+
+  var restorePick = "";
+
+  function openRestore() {
+    if (busy) return;
+    $("rs-dir").textContent = backupDir || "/data/adb/gbl-slotflag/backup";
+    var list = $("rs-list");
+    list.innerHTML = "";
+    restorePick = "";
+    $("rs-ok").disabled = true;
+    $("sheet-restore").classList.add("open");
+
+    run(CTL + " backups").then(function (r) {
+      var files = r.stdout.split(/\r?\n/).filter(function (l) { return l.trim(); });
+      if (!files.length) {
+        list.appendChild(el("div", null, "no backups yet"));
+        return;
+      }
+      files.forEach(function (f) {
+        var d = el("div", null, f.replace(/^.*\//, ""));
+        d.addEventListener("click", function () {
+          Array.prototype.forEach.call(list.children, function (c) {
+            c.classList.remove("sel");
+          });
+          d.classList.add("sel");
+          restorePick = f;
+          $("rs-ok").disabled = false;
+        });
+        list.appendChild(d);
+      });
+      /* preselect the newest */
+      list.firstChild.click();
+    }).catch(function (e) {
+      list.appendChild(el("div", null, e.message || String(e)));
+    });
+  }
+
+  function doRestore() {
+    if (busy || !restorePick) return;
+    var outcome = null;
+    closeSheet("sheet-restore");
+    busy = true;
+    syncButtons();
+    return run(CTL + " restore " + restorePick).then(function (r) {
+      setLog(r.stdout + (r.stderr ? "\n[stderr]\n" + r.stderr : ""));
+      var o = parse(r);
+      if (o.error) outcome = { kind: "", text: o.error };
+      else outcome = { kind: "ok", text: "Restored " + (o.path || restorePick) };
+    }).catch(function (e) {
+      outcome = { kind: "", text: e.message || String(e) };
+    }).then(function () {
+      busy = false;
+      return refresh();
+    }).then(function () {
+      if (outcome) setFlash(outcome.kind, outcome.text);
+    });
+  }
+
+  function closeSheet(id) { $(id).classList.remove("open"); }
+
+  /* ---------- wiring ---------------------------------------------- */
+
+  $("btn-refresh").addEventListener("click", refresh);
+  $("btn-backup").addEventListener("click", doBackup);
+  $("btn-restore").addEventListener("click", openRestore);
+  $("btn-log").addEventListener("click", function () {
+    $("log").classList.toggle("hidden");
+  });
+  $("sh-cancel").addEventListener("click", function () { closeSheet("sheet"); });
+  $("rs-cancel").addEventListener("click", function () { closeSheet("sheet-restore"); });
+  $("rs-ok").addEventListener("click", doRestore);
+  Array.prototype.forEach.call(document.querySelectorAll(".sheet"), function (s) {
+    s.addEventListener("click", function (ev) {
+      if (ev.target === s) s.classList.remove("open");
+    });
+  });
+
+  if (!ksuAvailable()) {
+    $("disk").textContent = "";
+    setFlash("", "KernelSU WebUI API not found. Open this page from the module " +
+               "list in your root manager (KernelSU / KernelSU-Next / APatch). " +
+               "If it is already open there, the manager is too old: update it.");
+    return;
+  }
+
+  refresh();
+})();
+</script>
+</body>
+</html>

@@ -517,6 +517,94 @@ fn patch12_clean_miss_without_anchor() {
     );
 }
 
+// --- patch13 — slot unbootable inertness ------------------------------
+
+#[test]
+fn patch13_table_membership() {
+    let p = patch_engine::abl_permissive::ABL_PERMISSIVE_PATCHES
+        .iter()
+        .find(|p| p.name == "patch13-slot-unbootable-inert")
+        .expect("patch13 missing from abl_permissive table");
+    assert!(!p.mandatory, "patch13 must be optional (never blocks chainload)");
+}
+
+#[test]
+fn patch13_clears_setter_serializer_predicate_and_both_reads() {
+    let buf = match infiniti_pe() {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP: patch13 — fixture missing");
+            return;
+        }
+    };
+    let size = buf.len() as u32;
+    let mut work = buf.clone();
+
+    // Stock words must all be present exactly once.
+    let stock = [
+        0x3209_0129u32, // ORR W9, W9, #0x800000   (setter)
+        0xD357_5F78u32, // UBFX X24, X27, #0x17, #1
+        0x5317_5D08u32, // UBFX W8, W8, #0x17, #1
+        0xD360_7D08u32, // LSL X8, X8, #0x20 (inside the predicate leaf)
+        0x7940_0D28u32, // LDRH W8, [X9, #6] (misc serializer)
+    ];
+    let mut offs = Vec::new();
+    for w in stock {
+        let (r, off) = scan_for(&work, &w.to_le_bytes(), None);
+        assert_eq!(
+            r,
+            ScanResult::Found,
+            "patch13 site 0x{w:08x} not unique in fixture"
+        );
+        offs.push(off);
+    }
+
+    use patch_engine::abl_permissive::slot_unbootable_clear;
+    assert_eq!(
+        slot_unbootable_clear::apply(&mut work, size),
+        PatchOutcome::Ok
+    );
+
+    assert_eq!(
+        read_instr_u32(&work, offs[0]),
+        0x1208_7929,
+        "setter must clear bit 23, not set it"
+    );
+    assert_eq!(
+        read_instr_u32(&work, offs[4]),
+        0x1200_1908,
+        "GPT attribute serializer must clear unbootable and keep the rest"
+    );
+    assert_eq!(read_instr_u32(&work, offs[1]), 0xAA1F_03F8, "decision read");
+    assert_eq!(read_instr_u32(&work, offs[2]), 0x2A1F_03E8, "counter read");
+    assert_eq!(read_instr_u32(&work, offs[3]), 0xAA09_03E8, "predicate leaf");
+
+    // The predicate leaf must keep its AND/CMP/RET and stay a 5-word
+    // block (offs[3] is the rewritten LSL, i.e. word #1).
+    assert_eq!(read_instr_u32(&work, offs[3] + 0x04), 0x924A_0508);
+    assert_eq!(read_instr_u32(&work, offs[3] + 0x08), 0xEB09_011F);
+    assert_eq!(read_instr_u32(&work, offs[3] + 0x0C), 0xD65F_03C0);
+    assert_eq!(read_instr_u32(&work, offs[3] - 0x04), 0xD2E0_0809);
+
+    let snapshot = work.clone();
+    assert_eq!(
+        slot_unbootable_clear::apply(&mut work, size),
+        PatchOutcome::Ok
+    );
+    assert_eq!(work, snapshot, "patch13 must be idempotent");
+}
+
+#[test]
+fn patch13_clean_miss_without_sites() {
+    let mut work = vec![0u8; 4096];
+    let size = work.len() as u32;
+    use patch_engine::abl_permissive::slot_unbootable_clear;
+    assert_eq!(
+        slot_unbootable_clear::apply(&mut work, size),
+        PatchOutcome::Miss
+    );
+}
+
 // --- Engine-level integration tests -----------------------------------
 
 #[test]
@@ -531,10 +619,10 @@ fn engine_scoped_oplus_applies_all_three() {
     let mut work = buf.clone();
     let engine = Engine::ensure_init_scoped(Oem::Oplus, true);
     let r = engine.apply(&mut work);
-    // patch7 + patch10 + patch6 + patch11 + patch12 = 5 applied.
+    // patch7 + patch10 + patch6 + patch11 + patch12 + patch13 = 6 applied.
     assert_eq!(
-        r.applied_count, 5,
-        "expected patch7 + patch10 + patch6 + patch11 + patch12 all OK"
+        r.applied_count, 6,
+        "expected patch7 + patch10 + patch6 + patch11 + patch12 + patch13 all OK"
     );
     assert_eq!(r.missed_count, 0);
     assert_eq!(r.worst, Worst::Ok);
@@ -552,8 +640,8 @@ fn engine_scoped_none_only_runs_abl_permissive() {
     let mut work = buf.clone();
     let engine = Engine::ensure_init_scoped(Oem::None, true);
     let r = engine.apply(&mut work);
-    // patch10 + patch6 + patch11 + patch12.
-    assert_eq!(r.applied_count, 4);
+    // patch10 + patch6 + patch11 + patch12 + patch13.
+    assert_eq!(r.applied_count, 5);
     assert_eq!(r.missed_count, 0);
     assert_eq!(r.worst, Worst::Ok);
 
@@ -575,7 +663,7 @@ fn engine_firmware_path_only_abl_permissive() {
     // Engine::ensure_init() is the firmware-mode entry point — must
     // contain exactly the abl_permissive set.
     let engine = Engine::ensure_init();
-    assert_eq!(engine.table().len(), 4);
+    assert_eq!(engine.table().len(), 5);
     for p in engine.table() {
         assert_eq!(p.scope, PatchScope::AblPermissive);
     }

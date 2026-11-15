@@ -485,3 +485,258 @@ Not the cause of the no-dtbo reset (that was the `&BootForceNormalBoot`
 overread); `fastboot oem boot-nodtbo` skips the overlay entirely. It matters
 for the normal `fastboot boot` path, which can apply the board DTBO, hyp
 DTBOs and the AVF DP DTBO through the same arena in one boot.
+
+## ABL slot metadata and the fastboot refusal exits (fairlady PLZ110 16.0.5.701)
+
+Verified statically against the unwrapped stock PE (778240 bytes,
+`gbl unwrap` of `abl_b-PLZ110_16.0.5.701(CN01).img`); file offsets equal RVAs
+because the PE has ImageBase 0.
+
+### Where the flag actually lives (correction)
+
+The per-slot attribute word is **not** in `misc`. It is the GPT partition-entry
+attribute field (`entry + 0x30`, `UINT64`) of `boot_a` / `boot_b`. Ground truth:
+`edk2/QcomModulePkg/Include/Library/PartitionTableUpdate.h`
+
+```
+#define PART_ATT_PRIORITY_BIT   48   /* 2 bits */
+#define PART_ATT_ACTIVE_BIT     50
+#define PART_ATT_MAX_RETRY_CNT_BIT 51 /* 3 bits */
+#define PART_ATT_SUCCESS_BIT    54
+#define PART_ATT_UNBOOTABLE_BIT 55
+#define ATTRIBUTE_FLAG_OFFSET   48
+```
+
+`UpdatePartitionAttributes()` (`PartitionTableUpdate.c`) rewrites **both** the
+primary and the backup GPT and recomputes the entry-array CRC and the header
+CRC for each. `0x20CDC` in this build is that function. `misc` is only the BCB
+(boot command) carrier: `sub_4E50` writes the 32-byte command at offset 0 and a
+`0x340`-byte tail, and reports "Error in writing to misc partition"; the misc
+records dumped earlier (`0x6414`/`0x64e4`/`0x71f0`, plus `sub_231E8` reading 832
+bytes) carry the BCB/recovery/FFBM fields, never slot attributes.
+
+`fastboot getvar slot-unbootable:a` (FastbootCmds.c) reads the same bit, so a
+read-only check needs no custom tool. There is no fastboot command that *sets*
+it; `fastboot flash boot`/`erase boot` clear it via `FastbootUpdateAttr`.
+
+### Slot attribute word
+
+`GetSlotInfoByName` (`sub_20BD0`) returns a pointer into a fixed array
+(stride `0x84`, count at `[0xBA000+0xC00]`). The per-slot attribute word lives
+at `slot_info + 0x34`:
+
+| bits | field |
+|---|---|
+| 16..17 | priority |
+| 18 | active |
+| 19..21 | retry count |
+| 22 | successful |
+| 23 | unbootable |
+
+Setters/readers of bit 23 found across the whole image (no others exist):
+
+| offset | instruction | role |
+|---|---|---|
+| `0x22ABC` | `ORR W9, W9, #0x800000` | the only setter |
+| `0x236E4` | `UBFX X24, X27, #0x17, #1` | retry / alternate-slot decision |
+| `0x21F90` | `UBFX W8, W8, #0x17, #1` | "how many slots are unbootable" counter |
+| `0x1BCD C/E`, `0x20A2C`, `0x20A78` | `TST`/`AND` + `CSEL` | bootconfig/log text only |
+
+`sub_56DB4` is the shared bootable predicate:
+
+```
+0x56DB4: BTI
+0x56DB8: MOV X9, #0x40000000000000
+0x56DBC: LSL X8, X8, #0x20
+0x56DC0: AND X8, X8, #0xC0000000000000
+0x56DC4: CMP X8, X9
+0x56DC8: RET
+```
+
+i.e. `Z = (attr & 3) == 1` → "successful and not unbootable". Its only three
+callers are `0x22B4C` (`ClearUnbootable` precondition), `0x256E0` (boot-image
+slot check) and `0x290F4` (`IsCurrentSlotBootable`). Rewriting the `LSL` to
+`MOV X8, X9` makes the following `AND`/`CMP` always compare equal, so all
+three answer "bootable" regardless of the stored flag.
+
+`0x20CDC` is the only function that writes slot metadata — it rewrites the
+in-RAM GPT entries onto the disk's primary and backup GPT
+(`0x22970` `SetActiveSlot` tail-calls it, `0x21FE8` calls it after clearing
+bit 23, `0x22A3C` `HandleActiveSlotUnbootable` calls it right after setting
+bit 23). It walks the RAM array (stride `0x84`, count at `[0xBA000+0xC00]`)
+and byte-packs each slot into a `0x80`-byte GPT partition entry:
+
+```
+0x21040  LDR  W8, [X9, #0x30]!   ; X9 = slot + 0x30
+0x21048  STRB W8, [X22, #0x31]   ; record+0x30..0x33 <- struct+0x30..0x33
+0x2105c  LDR  W8, [X9, #4]       ; attr word (slot + 0x34)
+0x21060  STRB W8, [X22, #0x34]   ; bits  0..7
+0x21068  LSR  X8, X8, #8
+0x2106c  STRB W8, [X22, #0x35]   ; bits  8..15
+0x21070  LDRH W8, [X9, #6]       ; bits 16..31
+0x21074  STRB W8, [X22, #0x36]   ; bits 16..23  <-- bit 23 = unbootable
+0x21078  LDRB W8, [X9, #7]
+0x2107c  STRB W8, [X22, #0x37]   ; bits 24..31
+```
+
+`LDRH W8,[X9,#6]` is unique in the image and only feeds that `STRB`, so
+replacing it with `AND W8, W8, #0x7F` drops bit 23 from **every** GPT attribute
+write while leaving priority/active/retry/successful untouched.
+
+The halfword loaded by `LDRH` is entry `+0x36..+0x37`, i.e. attribute bits
+48..63, so the five fields sit at bit 0..7 of the loaded value — not at 16..23.
+An earlier revision used `UBFX X8, X8, #8, #7`, which extracted attribute bits
+56..62 (always zero) and therefore zeroed the entire byte on every write; the
+replacement also needs the neighbouring `STRB`/`LDRB` as an idempotency anchor
+because `AND W8, W8, #0x7F` alone is not unique in the image. Patch13 uses that
+in addition to forcing the in-RAM predicate, so the flag is both ignored and
+erased on disk.
+
+`HandleActiveSlotUnbootable` is not a brick path: an exhausted slot prints
+`Slot %s is unbootable, trying alternate slot`, and "no slot left" prints
+`Reset unbootable slots failed enter fastboot mode` / `Non Multi-slot:
+Unbootable entering fastboot mode`, then returns into fastboot. The cold
+reset happens later, in the fastboot entry itself.
+
+### Fastboot entry refusals (decompiled)
+
+`LinuxLoaderEntry` (`0x4E54`, decompiled with IDA Hex-Rays) resolves two
+independent inputs before deciding:
+
+```c
+v15 = gBS->LocateProtocol (&gEfiMemCardInfoProtocolGuid, 0, &v338);  /* 0x506C */
+v8  = v15;                       /* x19; < 0 means "no storage protocol" */
+if (v15 < 0) { byte_100BABA0 = 1; goto LABEL_23; }   /* still continues */
+
+v161 = sub_10035660(&v368);                      /* olock RPMB boot info */
+v162 = (v161 == 0) && (DWORD1(v368) == 1);       /* olock secure lock    */
+```
+
+and then:
+
+```c
+if (fastboot_requested) {                        /* byte_100BAB88 */
+    if (v162) goto REFUSE;                       /* 0x6CD8 CBZ W26 */
+LABEL_341:
+    if (v8 < 0) goto SPIN;                       /* 0x6D64 TBNZ X19,#63 */
+LABEL_342:
+    print "Launching fastboot";                  /* 0x6D68 */
+    if (sub_1003E550(...) != 0) {                /* fastboot_unlock_verify */
+        print "...error and reboot.";
+        sub_100292AC(0x3E);                      /* 0x6D94 */
+    }
+    print "Fastboot Build Info: ...";
+}
+REFUSE:                                           /* 0x6CDC */
+    print "if olock secure lock state, Not allow Fastboot.";
+    sub_100292AC(0x3E);                           /* 0x6CF0 */
+    if (v8 < 0) goto SPIN;                        /* 0x6CF4 TBZ X19,#63 */
+    goto LABEL_342;
+SPIN:                                             /* 0x6CF8 */
+    print "No fastboot support for flashless chipsets, Infinte loop";
+    for (;;) ;                                    /* 0x6D08 B . */
+```
+
+There is a second entry into `LABEL_341`/`REFUSE`: the shared tail at
+`0x6D60` (`CBNZ W26, 0x6CDC`) used by the non-fastboot block at `0x6D0C`
+(after `sub_10023444`/`LoadImageAndAuth` fails it falls through to the same
+`TBNZ X19,#63` at `0x6D64`).
+
+`v8 < 0` is *not* fatal for the rest of the function: the error branch jumps
+to `LABEL_23` and continues initialisation, and `v338` is never dereferenced
+afterwards (3 references total: declaration, zero-init, `LocateProtocol`).
+So `SPIN` is a policy choice, not a hard requirement — it assumes "no
+MemCardInfo protocol == flashless chipset", which also matches a driver that
+has not been connected yet.
+
+This is why patch12 v1 (NOP both resets) bricked: with `v162 != 0` the
+device used to reset at `0x6CF0` and never reached `0x6D08`; with the reset
+gone it fell into the spin and produced no USB, no reset and no key window.
+
+### All reset sites in the image
+
+`gRT->ResetSystem` is reached through two shapes: the wrapper
+`sub_100292AC(status)` and direct `[gRT+0x68]` calls. Full list:
+
+| offset | shape | trigger |
+|---|---|---|
+| `0x645C` | `sub_100292AC` | SdccFwOps firmware flash |
+| `0x6CC8` | `sub_100292AC(62)` | olock locked **and** boot mode recovery: clear recovery from misc, then reset |
+| `0x6CF0` | `sub_100292AC(62)` | olock locked **and** fastboot: the orange branch |
+| `0x6D94` | `sub_100292AC(62)` | `fastboot_unlock_verify` refused |
+| `0x1C0A0` `0x1C11C` `0x1F570` `0x1F5D0` | `sub_100292AC` | explicit `fastboot reboot*` commands |
+| `0x32998` | `sub_100292AC` | boot-mode dispatch: mode > 9 or outside the handled mask (reason 1), `ffbm-00`/`qmmi` (0x3E), alloc failure (1) |
+| `0x22AFC` | direct | `HandleActiveSlotUnbootable`: slot has successful **and** unbootable set ("DDR BitFlip") |
+| `0x22BE4` | direct | `HandleActiveSlotUnbootable`: alternate slot bootable → clear it → reboot (normal A/B switch) |
+| `0x2584C` | direct | `HandleActiveSlotUnbootable_vb2`: same switch on the vb2 path |
+| `0x2947C` | direct | `sub_10029440`: warm reset after display power-down |
+| `0x2B3C0` `0x2B780` `0x2E978` | direct | libavb `AVB_HASHTREE_ERROR_MODE_MANAGED_RESTART_AND_EIO` restart path (unreachable once patch10 forces success) |
+
+Loop analysis for the boot-failure scenario:
+
+- `0x6CF0` / `0x6D08` — removed by patch12 v3.
+- `0x22BE4` / `0x2584C` — bounded: they clear the alternate slot's retry
+  counter and unbootable bit, then reboot once so the next boot can use it.
+- `0x22AFC` — requires `successful` **and** `unbootable` to be set together
+  on the same slot. patch13's GPT attribute writer drops bit 55 on every write,
+  so at most one boot can see that combination.
+- `0x6CC8` — only when olock-locked and booting recovery; it clears the
+  recovery flag, so the next boot is a normal one.
+- `0x32998` — unbounded in principle (an unsupported boot mode in `misc`
+  would reset every boot), but it is a separate corruption scenario and
+  patch12 does not touch it.
+
+### patch12 v4 verification
+
+Five branch rewrites plus one NOP, on the stock fairlady PE:
+
+| offset | stock | patched | effect |
+|---|---|---|---|
+| `0x6CD8` | `3400047A` `CBZ W26, 0x6D64` | `14000024` `B 0x6D68` | fastboot path skips REFUSE |
+| `0x6CF4` | `B6F803B3` `TBZ X19,#63,0x6D68` | `1400001D` `B 0x6D68` | REFUSE fall-through skips SPIN |
+| `0x6D60` | `35FFF AFA` `CBNZ W26, 0x6CDC` | `14000002` `B 0x6D68` | `LoadImageAndAuth` failure skips REFUSE |
+| `0x6D64` | `B7FFFCB3` `TBNZ X19,#63,0x6CF8` | `14000001` `B 0x6D68` | shared `LABEL_341` tail skips SPIN |
+| `0x7A2C` | `34FF99DA` `CBZ W26, 0x6D64` | `17FFFCCF` `B 0x6D68` | `OplusInitRecordData` failure skips REFUSE |
+| `0x6D94` | `94008946` `BL 0x292AC` | `D503201F` `NOP` | verify refusal stops rebooting |
+
+`0x6CF0` (`BL <reset>`) and `0x6D08` (`B .`) keep their stock bytes.
+
+Reachability check over `0x4E54`–`0x8AD0` (all `b`/`b.cond`/`cbz`/`cbnz`/
+`tbz`/`tbnz` edges, `bl`/`blr` treated as returning, jump tables `br` at
+`0x5A44` and `0x8560` conservative):
+
+- patched: 3649 of 3871 instructions reachable;
+  `0x6CDC` .. `0x6CF4` (REFUSE) and `0x6CF8` .. `0x6D08` (SPIN) **unreachable**;
+  `0x6D68` (`Launching fastboot`) reachable.
+- stock: both regions reachable.
+
+### Remaining resets on the boot-failure path
+
+Inside `LinuxLoaderEntry`, two reset sites are still reachable, both on the
+**recovery** branch (`0x6BC4`–`0x6CC8`), entered only when
+`word_100BAB8C == 1` (recovery requested) **and** `DWORD1(v368) == 1`
+(olock secure lock):
+
+```
+0x6BF0  CBNZ X0, 0x6CC4     ; v170 == 2 && sub_100184D4() != 0
+0x7200  B 0x6CC4            ; "Error in loading Data from misc partition"
+0x6CC4  MOV W0, #0x3E
+0x6CC8  BL  <ResetSystem>
+```
+
+The normal exit of that block clears the recovery command in `misc` before
+resetting, so it is normally one-shot; the two entries above reset without
+clearing, so they can loop. They are **not** patched here: simply NOPing
+`0x6CC8` would fall into `0x6CCC`, which reads `[X21+0xB88]` and expects
+`X21 == 0xBA000`; on the recovery path `X21` holds a different pointer, so
+the redirect target would have to be chosen after checking live register
+state (`X20`/`X22`/`X23`/`X26` are also live at `0x6D0C`).
+
+With `fastboot` as the boot mode (the A/B-exhausted case) the recovery flag is
+0, so none of this is reachable.
+
+### Not a brick path
+
+`fastboot boot` hanging on the ORANGE menu is a separate, GBL-side issue (see
+the GBL FastbootLib section); the ABL ORANGE screen is patch7's target. The
+`unbootable` flag alone never denies fastboot.

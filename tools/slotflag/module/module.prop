@@ -1,0 +1,6 @@
+id=gbl-slotflag
+name=GBL Slot Flag
+version=v1.0
+versionCode=1
+author=gbl-chainload
+description=Read/write Qualcomm ABL A/B slot attributes (GPT attributes of boot_a/boot_b) to test patch12/patch13 on the bench instead of by bricking.

@@ -132,6 +132,191 @@ and does not create one. Historical `v...` tags and b4 checkpoints remain
 available, but do not trigger new releases. Artifact filenames and changelog
 version headings retain their existing version format.
 
+## Slot flags: `gbl slot` + KernelSU harness
+
+The A/B slot attributes live in the GPT entries of `boot_a`/`boot_b`, not in
+`misc` (see `docs/project/re-findings.md`, "Where the flag actually lives"):
+
+```text
+entry + 0x30, UINT64
+  bits 48..49  priority
+  bit  50      active
+  bits 51..53  max retry count
+  bit  54      successful
+  bit  55      unbootable
+```
+
+`gbl slot` reads and rewrites that word. Like ABL's
+`UpdatePartitionAttributes()`, it stores the same table to **both** the primary
+and the backup GPT and recomputes the entry-array CRC and the header CRC of
+each, so a write is equivalent to what ABL does on `fastboot set_active`.
+
+```sh
+gbl slot show                        # on device: local GPT; on host: fastboot getvar
+gbl slot show --fastboot             # read-only over fastboot (no root)
+gbl slot show --adb                  # run the module binary on the phone (all fields)
+gbl slot show --disk /dev/block/sda  # local node or an image file
+gbl slot set --slot b --unbootable 0 --dry-run
+gbl slot set --slot b --unbootable 0 --adb
+gbl slot backup --out gpt.bin               # local
+gbl slot backup --adb --out gpt.bin         # dump on the phone, adb pull
+gbl slot restore --in gpt.bin --adb
+```
+
+On a host there is no `/dev/block` for the phone, so `gbl slot show` falls back
+to `fastboot getvar` automatically. ABL publishes `slot-unbootable:{a,b}`,
+`slot-successful:{a,b}`, `slot-retry-count:{a,b}` and `current-slot`
+unconditionally (`FastbootCmds.c:466 FastbootPublishSlotVars`), but **not**
+priority/active — use `--adb` when you need every field. Writing is only
+possible through `--adb` (or the on-device binary): fastboot has no command
+that sets these bits. Both remote paths probe `fastboot devices` / `adb devices`
+first, so they never hang waiting for a device.
+
+The disk is resolved from `/dev/block/by-name/boot_a` (partition suffix
+stripped: `sda17`→`sda`, `mmcblk0p12`→`mmcblk0`), else by scanning
+`/dev/block`; `--disk` overrides it, `--lba` pins the sector size instead of
+probing 512/4096. Refusals are deliberate:
+
+- a GPT header or entry array whose CRC does not validate is never written;
+- both `boot_a` and `boot_b` must exist;
+- making **both** slots unbootable needs `--force` — that is the state stock
+  ABL cannot leave without fastboot.
+
+`cargo test -p gbl` covers the parser/writer against a synthetic 512- and
+4096-byte-sector GPT (round-trip, reseal, corrupt-table rejection).
+
+The same binary is shipped in a KernelSU module with a WebUI, so the flag can
+be flipped from the phone without a boot failure:
+
+```sh
+./tools/slotflag/build.sh     # cross-builds gbl for aarch64 -> dist/gbl-slotflag-v1.0.zip
+```
+
+The module ships `bin/gbl` (the same multicall binary) plus `bin/slotctl`, a
+small shell wrapper that pins the paths and creates
+`/data/adb/gbl-slotflag/backup` on demand. The WebUI only talks to `slotctl`:
+
+```sh
+slotctl state                 # key=value dump used by the page
+slotctl set --slot b --unbootable 1
+slotctl backup                # -> path=/data/adb/gbl-slotflag/backup/gpt-*.bin
+slotctl backups               # newest first
+slotctl restore [FILE]        # default: newest backup
+```
+
+The page serialises `ksu.exec` calls, treats a non-zero `errno` as failure,
+keeps the action result visible across a refresh, and disables the controls
+while a write is in flight. It is covered by a headless test that loads the
+real page in jsdom against a fake `slotctl`:
+
+```sh
+npm install jsdom
+node tools/slotflag/webui-test.js
+``` It leaves `webroot/` permissions to the manager
+(KernelSU sets mode + SELinux context there). `fastboot getvar
+slot-unbootable:a` reads the same bit for a host-side cross-check.
+
+## ABL patch12 v2 / patch13 (fairlady)
+
+Two host-side `CACHED_ABL` patches cover the OPPO failure paths that turn a
+recoverable device into a black brick.
+
+**patch12 v4 — orange branch disabled (all entries).** The fastboot entry
+(`LinuxLoaderEntry`, PE `0x4E54` on PLZ110 16.0.5.701) can lose the device in
+three places:
+
+```c
+if (fastboot_requested) {
+    if (olock_secure_lock) goto REFUSE;      /* 0x6CD8 CBZ W26 */
+LABEL_341:
+    if (no_memcard_protocol) goto SPIN;      /* 0x6D64 TBNZ X19,#63 */
+LABEL_342:
+    print "Launching fastboot";              /* 0x6D68 */
+    if (fastboot_unlock_verify() != 0) {
+        print "...error and reboot.";
+        ResetSystem(0x3E);                   /* 0x6D94 */
+    }
+} else if (LoadImageAndAuth() != 0) {
+    if (olock_secure_lock) goto REFUSE;      /* 0x6D60 CBNZ W26 */
+}
+/* ... early init failure ... */ goto REFUSE;  /* 0x7A2C CBZ W26 / 0x7A30 B */
+REFUSE: print "if olock secure lock state, Not allow Fastboot.";
+        ResetSystem(0x3E);                   /* 0x6CF0 */
+        if (no_memcard_protocol) goto SPIN;  /* 0x6CF4 TBZ X19,#63 */
+        goto LABEL_342;
+SPIN:   print "No fastboot support for flashless chipsets, Infinte loop";
+        for (;;) ;                           /* 0x6D08 */
+```
+
+`SPIN` is the worse of the two: no reset and no USB, so there is no key
+window and no transport. `REFUSE` at least restarts, but an A/B-exhausted
+device then resets forever.
+
+v1 NOPed both resets, which turned the reset loop into `SPIN` and bricked a
+device. v2 only kept the reset for the no-protocol case, leaving one route
+into `SPIN`. v3 disabled `REFUSE` for the fastboot path only. **v4 removes
+every route**, by rewriting the five branches that lead into the two bad
+blocks:
+
+| offset | stock | patched |
+|---|---|---|
+| `0x6CD8` | `CBZ W26, 0x6D64` | `B 0x6D68` |
+| `0x6CF4` | `TBZ X19,#63,0x6D68` | `B 0x6D68` |
+| `0x6D60` | `CBNZ W26, 0x6CDC` | `B 0x6D68` |
+| `0x6D64` | `TBNZ X19,#63,0x6CF8` | `B 0x6D68` |
+| `0x7A2C` | `CBZ W26, 0x6D64` | `B 0x6D68` |
+
+plus `0x6D94` `BL <ResetSystem>` → `NOP` for the `fastboot_unlock_verify`
+refusal.
+
+`0x6CF0` and `0x6D08` keep their stock bytes; after these rewrites nothing
+branches into `REFUSE` (`0x6CDC`–`0x6CF4`) or `SPIN` (`0x6CF8`–`0x6D08`), so
+control always reaches `Launching fastboot`. Verified by control-flow
+reachability over the whole function, not by inspection. The A/B retry
+counter and slot switching are never touched.
+
+Still present, deliberately: the **recovery** refusal block
+(`0x6BC4`–`0x6CC8`, entered only when a recovery boot is requested *and* the
+olock secure-lock state is set) ends in `ResetSystem(0x3E)` at `0x6CC8`, and
+`0x7200` jumps to the same instruction from a misc-read failure. That path is
+a state change plus a reboot, not the fastboot brick, and redirecting it
+safely needs a live check of the register state at `0x6CCC`; it is left
+untouched.
+
+**patch13 — slot unbootable cleared, in RAM and on disk.** ABL keeps a
+per-slot attribute word at `slot_info + 0x34` (priority 16..17, active 18,
+retry 19..21, successful 22, unbootable 23). That word is the GPT entry
+attribute field of `boot_a`/`boot_b` (bits 48..55), not part of `misc`.
+patch13 makes bit 23 inert and erases it from the GPT, without touching retry
+counts or slot switching:
+
+- the setter `ORR W9, W9, #0x800000` becomes
+  `AND W9, W9, #0xFF7FFFFF`. The very next instruction is
+  `BL <write slot metadata>` (`0x20CDC`), so the cleared value lands in
+  the GPT immediately;
+- `0x20CDC` is the only function that writes slot metadata (to the primary and
+  backup GPT)
+  (`SetActiveSlot`, `ClearUnbootable` and `HandleActiveSlotUnbootable` all
+  funnel through it). It byte-packs the attribute word per 0x80-byte GPT
+  partition entry;
+  the load producing the bits 16..23 byte, `LDRH W8, [X9, #6]`, becomes
+  `AND W8, W8, #0x7F`. The halfword is already the upper half of the attribute
+  dword, so its bits 0..7 carry priority/active/retry/successful/unbootable and
+  only bit 7 is dropped. Every GPT attribute write — `set_active`,
+  `ClearUnbootable`, the retry-count decrement, `MarkPtnActive` — therefore
+  stores `unbootable = no` for every slot, whatever RAM or the previous image
+  held. Nothing is cleared at boot time: a healthy boot performs no write;
+- the shared bootable predicate leaf is forced to "successful", so
+  `IsCurrentSlotBootable`, the `ClearUnbootable` precondition and the
+  boot-image slot check see a bootable slot for the whole current boot,
+  before the first GPT write lands;
+- the decision read `UBFX X24, X27, #0x17, #1` and the counter read
+  `UBFX W8, W8, #0x17, #1` become `MOV X24, XZR` / `MOV W8, WZR`.
+
+Only bit 23 is touched: bits 16..22 (priority, active, retry, successful) are
+preserved byte-for-byte, and the record layout/header handling stays exactly
+as stock — one bit in one byte differs.
+
 ### patch11c — disabled-vbmeta cmdline
 
 patch11 now has three parts: 11a forces the outbound device state to `locked`,
