@@ -1,7 +1,7 @@
 //! ABL-permissive patches — always compiled (firmware + host).
 //!
 //! Port of `GblChainloadPkg/Library/DynamicPatchLib/abl_permissive/`.
-//! Five patch entries:
+//! Three cross-OEM patch entries:
 //!
 //! - [`libavb_force_success`] — patch10. Forces libavb's
 //!   `avb_slot_verify` to always return OK with populated SlotData,
@@ -14,22 +14,14 @@
 //!   and the verified-boot color table always answers `green`. It also
 //!   includes 11c, which publishes `androidboot.vbmeta.*` for a
 //!   verification-disabled top-level vbmeta.
-//! - [`boot_failure_fallback`] — patch12 (optional). Keeps the A/B
-//!   retry counter and slot switching intact, but routes the
-//!   "cold-reset instead of fastboot" exits so a device with no
-//!   bootable slot can still reach fastboot — while keeping every
-//!   remaining failure path able to reset (no silent spins).
-//! - [`slot_unbootable_clear`] — patch13 (optional). Makes a stored
-//!   per-slot `unbootable` attribute inert for boot decisions: ABL never
-//!   believes or counts one. The GPT write path stays stock.
+//! Oplus-specific patch12/13 live in [`crate::oem::oplus`], not in this
+//! always-on group.
 //! [`vbmeta_disabled_cmdline`] is the implementation of patch11c and is
 //! not a separate table entry.
 
 pub mod libavb_force_success;
 pub mod fastboot_lock_gates;
 pub mod locked_handoff;
-pub mod boot_failure_fallback;
-pub mod slot_unbootable_clear;
 pub mod vbmeta_disabled_cmdline;
 
 use crate::{PatchDesc, PatchScope};
@@ -54,17 +46,5 @@ pub const ABL_PERMISSIVE_PATCHES: &[PatchDesc] = &[
         scope: PatchScope::AblPermissive,
         mandatory: false,
         apply: locked_handoff::apply,
-    },
-    PatchDesc {
-        name: "patch12-boot-failure-fastboot-fallback",
-        scope: PatchScope::AblPermissive,
-        mandatory: false,
-        apply: boot_failure_fallback::apply,
-    },
-    PatchDesc {
-        name: "patch13-slot-unbootable-inert",
-        scope: PatchScope::AblPermissive,
-        mandatory: false,
-        apply: slot_unbootable_clear::apply,
     },
 ];

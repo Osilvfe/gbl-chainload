@@ -1,4 +1,4 @@
-//! patch12 — boot-failure fallback: disable the orange branch (v3).
+//! Oplus patch12 — boot-failure fallback: disable the orange branch (v3).
 //!
 //! The vendor boot flow keeps the A/B retry counter and slot switching
 //! exactly as designed. What it does *not* do is let a device with no

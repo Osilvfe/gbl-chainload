@@ -92,7 +92,7 @@ echo ">>> cargo build: crates/mode2-profile-core (aarch64-unknown-none ELF stati
 cargo build --release --target aarch64-unknown-none -p mode2-profile-core --no-default-features
 
 # PR2 Task 6: the dynamic patch engine moved into crates/patch-engine.
-# `--no-default-features` strips the host-only OEM + retired modules
+# `--no-default-features` strips host-only patch7 + retired modules
 # from the firmware staticlib — only the abl_permissive group
 # (patch6 + patch10) ships on-device.
 echo ">>> cargo build: crates/patch-engine (aarch64-unknown-none ELF staticlib)"

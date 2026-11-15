@@ -84,7 +84,9 @@ Flags:
 - `--oem <id>` — OEM patch group. Canonical: `oplus`, `none`. Default
   `none` (no OEM-scoped patches). `oneplus` is accepted as a deprecation
   alias for `oplus` (still maps to `Oem::Oplus`; prints a one-time
-  warning; will be removed in a future release).
+  warning; will be removed in a future release). `oplus` enables
+  patch7/12/13. All three are skipped with `none` or no `--oem`; they
+  are not attempted and do not count as optional misses.
 - `--require-patch11` — fail unless patch11a/11b/11c all apply. The disabled-
   vbmeta cmdline edit is now 11c and part of patch11. `efisp-package.py`
   enables this automatically for mode 2.
@@ -92,6 +94,14 @@ Flags:
   compatibility.
 - `abl_permissive` patches are always applied at host packing time — the
   on-device manifest decides at runtime whether they take effect.
+
+The cross-OEM group contains patch6/10/11. Patch12/13 remain optional
+Oplus-only patches; their instruction rewrites and GPT write behavior are
+unchanged. Firmware fallback from a live ABL enables patch12/13 only when
+both Oplus vendor strings (`if olock secure lock state, Not allow Fastboot.`
+and `OplusInitRecordData failed: %r\n`) are present. Unknown/non-Oplus
+images skip them entirely. This content check does not enable patch7,
+which remains host-only. It does not change already-generated EFISP files.
 
 Note (post-PR1): `gbl patch` has NO `--no-mode1` flag. Engine-rework
 PR1 collapsed the mode-1 patch group into the always-on `abl_permissive`
@@ -281,6 +291,9 @@ python3 scripts/efisp-package.py \
 ```
 
 Mode-specific inputs:
+
+For OnePlus/Oppo/Realme packaging, pass `--oem oplus` to include patch12/13
+as well as patch7. For Xiaomi/Redmi, omit `--oem` or use `--oem none`.
 
 | Mode | Base EFI     | Required extra files                                                    | What gets packed                                          |
 |------|--------------|-------------------------------------------------------------------------|-----------------------------------------------------------|

@@ -76,8 +76,9 @@ typedef int GBL_OEM;
 
 /* ---- Engine entry points ---------------------------------------------- */
 
-/* Firmware path: populate the active patch table with abl_permissive
- * (patch6 + patch10). Call once before DynamicPatch_Apply.
+/* Firmware path: select patch6/10/11 and detect the input ABL's Oplus
+ * vendor markers before enabling patch12/13. Patch7 remains host-only.
+ * Call once before DynamicPatch_Apply.
  *
  * Replaces DynamicPatchLib_EnsureInit() from the deleted PatchTable.c. */
 void DynamicPatchLib_EnsureInit(void);

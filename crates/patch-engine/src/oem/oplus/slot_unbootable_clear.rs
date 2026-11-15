@@ -1,4 +1,4 @@
-//! patch13 — never treat an A/B slot as unbootable (read-side only).
+//! Oplus patch13 — never treat an A/B slot as unbootable (read-side only).
 //!
 //! OPPO's ABL keeps one attribute word per slot in the GPT partition
 //! entry's 64-bit `Attributes` field (`boot_a` / `boot_b`). The high

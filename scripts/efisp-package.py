@@ -108,8 +108,8 @@ def main():
     ap.add_argument("--unixnu-loader-efi", help="optional DarwinBoot.efi loader "
                                                "driver to embed as 0x0031")
     ap.add_argument("--stock-vbmeta", help="stock vbmeta image (mode 2 only)")
-    ap.add_argument("--oem", help="OEM id for abl-patcher --oem "
-                                  "(allowed for any --mode)")
+    ap.add_argument("--oem", help="OEM patch group: oplus enables patch7/12/13; "
+                                  "none (default) skips them; allowed for any --mode")
     ap.add_argument("--experimental-vbmeta-cmdline", action="store_true",
                     help="deprecated no-op: this edit is now patch11c and "
                          "is applied automatically")

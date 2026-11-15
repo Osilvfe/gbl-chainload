@@ -35,14 +35,12 @@ OUT=tests/host/.last/088
 mkdir -p "$OUT"
 
 # oplus-family ABLs: patch7 must apply.  Add new dumps here as they land.
-OPLUS_ABLS=(
-  tests/images/op15-infiniti-703-abl.img
-  tests/images/op15-infiniti-201-abl.img
-  tests/images/op15t-fairlady-201-abl.img
-)
+shopt -s nullglob
+OPLUS_ABLS=(tests/images/op*-abl.img)
 # non-oplus ABL: patch7 must cleanly miss (no false positive).
 NONOPLUS_ABLS=(
-  tests/images/xi17-pudding-44-abl.img
+  tests/images/xi*-abl.img
+  tests/images/redmi*-abl.img
 )
 
 ran=0

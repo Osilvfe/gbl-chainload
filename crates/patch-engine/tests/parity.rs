@@ -431,10 +431,11 @@ fn b_target(word: u32, off: u32) -> u32 {
 
 #[test]
 fn patch12_table_membership() {
-    let p = patch_engine::abl_permissive::ABL_PERMISSIVE_PATCHES
+    let p = patch_engine::oem::oplus::OPLUS_BOOT_PATCHES
         .iter()
         .find(|p| p.name == "patch12-boot-failure-fastboot-fallback")
-        .expect("patch12 missing from abl_permissive table");
+        .expect("patch12 missing from Oplus table");
+    assert_eq!(p.scope, PatchScope::OemOplus);
     assert!(!p.mandatory, "patch12 must be optional (never blocks chainload)");
 }
 
@@ -468,7 +469,7 @@ fn patch12_v3_removes_both_the_reset_and_the_spin() {
         assert_eq!(read_instr_u32(&work, adrp + 0x10), ARM64_MOV_W0_RESET_REASON);
     }
 
-    use patch_engine::abl_permissive::boot_failure_fallback;
+    use patch_engine::oem::oplus::boot_failure_fallback;
     assert_eq!(
         boot_failure_fallback::apply(&mut work, size),
         PatchOutcome::Ok
@@ -510,7 +511,7 @@ fn patch12_v3_removes_both_the_reset_and_the_spin() {
 fn patch12_clean_miss_without_anchor() {
     let mut work = vec![0u8; 4096];
     let size = work.len() as u32;
-    use patch_engine::abl_permissive::boot_failure_fallback;
+    use patch_engine::oem::oplus::boot_failure_fallback;
     assert_eq!(
         boot_failure_fallback::apply(&mut work, size),
         PatchOutcome::Miss
@@ -521,10 +522,11 @@ fn patch12_clean_miss_without_anchor() {
 
 #[test]
 fn patch13_table_membership() {
-    let p = patch_engine::abl_permissive::ABL_PERMISSIVE_PATCHES
+    let p = patch_engine::oem::oplus::OPLUS_BOOT_PATCHES
         .iter()
         .find(|p| p.name == "patch13-slot-unbootable-inert")
-        .expect("patch13 missing from abl_permissive table");
+        .expect("patch13 missing from Oplus table");
+    assert_eq!(p.scope, PatchScope::OemOplus);
     assert!(!p.mandatory, "patch13 must be optional (never blocks chainload)");
 }
 
@@ -573,7 +575,7 @@ fn patch13_forces_reads_without_touching_gpt_write_sites() {
         read_offs.push(off);
     }
 
-    use patch_engine::abl_permissive::slot_unbootable_clear;
+    use patch_engine::oem::oplus::slot_unbootable_clear;
     assert_eq!(
         slot_unbootable_clear::apply(&mut work, size),
         PatchOutcome::Ok
@@ -616,7 +618,7 @@ fn patch13_forces_reads_without_touching_gpt_write_sites() {
 fn patch13_clean_miss_without_sites() {
     let mut work = vec![0u8; 4096];
     let size = work.len() as u32;
-    use patch_engine::abl_permissive::slot_unbootable_clear;
+    use patch_engine::oem::oplus::slot_unbootable_clear;
     assert_eq!(
         slot_unbootable_clear::apply(&mut work, size),
         PatchOutcome::Miss
@@ -658,10 +660,13 @@ fn engine_scoped_none_only_runs_abl_permissive() {
     let mut work = buf.clone();
     let engine = Engine::ensure_init_scoped(Oem::None, true);
     let r = engine.apply(&mut work);
-    // patch10 + patch6 + patch11 + patch12 + patch13.
-    assert_eq!(r.applied_count, 5);
+    assert_eq!(r.applied_count, 3);
     assert_eq!(r.missed_count, 0);
     assert_eq!(r.worst, Worst::Ok);
+
+    for offset in oplus_boot_offsets(&buf) {
+        assert_eq!(&work[offset..offset + 4], &buf[offset..offset + 4]);
+    }
 
     // patch7 must NOT have been touched — verify by re-running just
     // patch7 in isolation; it should still find the original CBZ and
@@ -677,12 +682,83 @@ fn engine_scoped_none_only_runs_abl_permissive() {
 }
 
 #[test]
-fn engine_firmware_path_only_abl_permissive() {
-    // Engine::ensure_init() is the firmware-mode entry point — must
-    // contain exactly the abl_permissive set.
+fn engine_firmware_base_table_only_abl_permissive() {
     let engine = Engine::ensure_init();
-    assert_eq!(engine.table().len(), 5);
+    assert_eq!(engine.table().len(), 3);
     for p in engine.table() {
         assert_eq!(p.scope, PatchScope::AblPermissive);
     }
+}
+
+fn oplus_boot_offsets(original: &[u8]) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    for patch in patch_engine::oem::oplus::OPLUS_BOOT_PATCHES {
+        let mut patched = original.to_vec();
+        assert_eq!(
+            (patch.apply)(&mut patched, original.len() as u32),
+            PatchOutcome::Ok
+        );
+        for (index, (before, after)) in original.chunks(4).zip(patched.chunks(4)).enumerate() {
+            if before != after {
+                offsets.push(index * 4);
+            }
+        }
+    }
+    offsets.sort_unstable();
+    offsets.dedup();
+    assert_eq!(offsets.len(), 9);
+    offsets
+}
+
+#[test]
+fn engine_firmware_detects_oplus_and_preserves_host_only_warning() {
+    let Some(original) = infiniti_pe() else {
+        return;
+    };
+    assert!(patch_engine::oem::oplus::matches_abl(&original));
+    let mut firmware = original.clone();
+    let result = Engine::ensure_init().apply(&mut firmware);
+    assert_eq!(result.applied_count, 5);
+    assert_eq!(result.missed_count, 0);
+    assert_eq!(result.worst, Worst::Ok);
+
+    let mut expected = original.clone();
+    Engine::ensure_init_scoped(Oem::None, true).apply(&mut expected);
+    for patch in patch_engine::oem::oplus::OPLUS_BOOT_PATCHES {
+        assert_eq!(
+            (patch.apply)(&mut expected, original.len() as u32),
+            PatchOutcome::Ok
+        );
+    }
+    assert_eq!(firmware, expected);
+}
+
+#[test]
+fn engine_firmware_skips_oplus_even_when_slot_patterns_match() {
+    let Some(original) = infiniti_pe() else {
+        return;
+    };
+    let offsets = oplus_boot_offsets(&original);
+    let mut unknown = original.clone();
+    for marker in [
+        PATCH12_ANCHOR_LOCKED,
+        b"OplusInitRecordData failed: %r\n".as_slice(),
+    ] {
+        let (result, offset) = scan_for(&unknown, marker, None);
+        assert_eq!(result, ScanResult::Found);
+        unknown[offset as usize] = b'?';
+    }
+    assert!(!patch_engine::oem::oplus::matches_abl(&unknown));
+    let mut firmware = unknown.clone();
+    let result = Engine::ensure_init().apply(&mut firmware);
+    assert_eq!(result.applied_count, 3);
+    assert_eq!(result.missed_count, 0);
+    assert_eq!(result.worst, Worst::Ok);
+    for offset in offsets {
+        assert_eq!(&firmware[offset..offset + 4], &unknown[offset..offset + 4]);
+    }
+    assert_eq!(
+        patch_engine::oem::oplus::slot_unbootable_clear::apply(&mut firmware, unknown.len() as u32,),
+        PatchOutcome::Ok,
+    );
 }

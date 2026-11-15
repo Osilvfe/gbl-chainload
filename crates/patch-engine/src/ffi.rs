@@ -81,7 +81,8 @@ pub struct CPatchResult {
 static mut ACTIVE: Option<Engine> = None;
 
 /// Replace `DynamicPatchLib_EnsureInit()` from the deleted
-/// `PatchTable.c`. Firmware-only entry point — selects abl_permissive.
+/// `PatchTable.c`. Firmware entry point — selects cross-OEM patches and
+/// detects Oplus from the input ABL before enabling patch12/13.
 #[no_mangle]
 pub extern "C" fn DynamicPatchLib_EnsureInit() {
     unsafe {
@@ -198,8 +199,7 @@ mod tests {
     fn apply_via_ffi_round_trip() {
         // Build a CPatchResult, call EnsureInit + Apply on a tiny
         // buffer that won't match any anchors, and verify the FFI shim
-        // wrote the expected aggregate (4 patches: patch10 + patch6
-        // mandatory MISS, patch11 + patch12 optional MISS).
+        // wrote the expected aggregate.
         let mut buf = vec![0u8; 4096];
         let mut r = CPatchResult {
             applied_count: 0,
@@ -210,10 +210,8 @@ mod tests {
         unsafe {
             DynamicPatch_Apply(buf.as_mut_ptr(), buf.len() as u32, &mut r);
         }
-        // abl_permissive = patch10 + patch6 (mandatory) + patch11 +
-        // patch12 + patch13 (optional); all MISS on a zero buffer.
         assert_eq!(r.applied_count, 0);
-        assert_eq!(r.missed_count, 5);
+        assert_eq!(r.missed_count, 3);
         assert_eq!(r.worst_outcome, CPatchWorst::MandatoryMiss);
     }
 }

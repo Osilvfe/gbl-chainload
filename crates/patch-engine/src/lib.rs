@@ -3,8 +3,8 @@
 //!
 //! Mirrors PR1's directory shape:
 //!
-//! - [`abl_permissive`] — always compiled. patch10 + patch6.
-//! - [`oem`] — host-only via `feature = "host"`. patch7 (oplus).
+//! - [`abl_permissive`] — cross-OEM patch10 + patch6 + patch11.
+//! - [`oem`] — Oplus patch12/13, plus host-only patch7.
 //! - [`retired`] — host-only documentation / reference. patch1 (efisp
 //!   recursion) — never wired into an active table.
 //!
@@ -37,7 +37,6 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 pub mod internal;
 pub mod abl_permissive;
-#[cfg(feature = "host")]
 pub mod oem;
 #[cfg(feature = "host")]
 pub mod retired;
@@ -128,6 +127,7 @@ pub struct PatchResult {
 #[derive(Clone)]
 pub struct Engine {
     table: EngineTable,
+    detect_oplus: bool,
 }
 
 #[derive(Clone)]
@@ -158,16 +158,13 @@ impl EngineTable {
 }
 
 impl Engine {
-    /// Firmware path: abl_permissive only.
-    ///
-    /// Mirrors the body of `DynamicPatchLib_EnsureInit()` from the
-    /// deleted `PatchTable.c` (which aggregates retired + oem-on-host +
-    /// abl_permissive — but retired is empty post-Task 10 and oem only
-    /// landed under `#ifdef __HOST_BUILD__`). The firmware table is
-    /// therefore exactly the abl_permissive set.
+    /// Firmware path: cross-OEM patches, plus patch12/13 only when the
+    /// input ABL contains both Oplus vendor markers. No allocation is
+    /// needed, and patch7 remains excluded from this path.
     pub fn ensure_init() -> Engine {
         Engine {
             table: EngineTable::Static(abl_permissive::ABL_PERMISSIVE_PATCHES),
+            detect_oplus: true,
         }
     }
 
@@ -186,8 +183,12 @@ impl Engine {
         if include_abl_permissive {
             v.extend_from_slice(abl_permissive::ABL_PERMISSIVE_PATCHES);
         }
+        if oem == Oem::Oplus {
+            v.extend_from_slice(oem::oplus::OPLUS_BOOT_PATCHES);
+        }
         Engine {
             table: EngineTable::Owned(v),
+            detect_oplus: false,
         }
     }
 
@@ -201,7 +202,12 @@ impl Engine {
         let mut missed: u32 = 0;
         let mut worst = Worst::Ok;
 
-        for p in self.table.as_slice() {
+        let oplus_patches = if self.detect_oplus && oem::oplus::matches_abl(pe) {
+            oem::oplus::OPLUS_BOOT_PATCHES
+        } else {
+            &[]
+        };
+        for p in self.table.as_slice().iter().chain(oplus_patches) {
             let outcome = (p.apply)(pe, size);
             self.emit_log(p, outcome);
             match outcome {
@@ -227,7 +233,7 @@ impl Engine {
         }
     }
 
-    /// Borrow the patch table.
+    /// Borrow the configured patch table, before firmware ABL detection.
     #[doc(hidden)]
     pub fn table(&self) -> &[PatchDesc] {
         self.table.as_slice()
@@ -240,6 +246,7 @@ impl Engine {
     pub fn from_static(table: &'static [PatchDesc]) -> Engine {
         Engine {
             table: EngineTable::Static(table),
+            detect_oplus: false,
         }
     }
 
@@ -410,8 +417,7 @@ mod tests {
     #[test]
     fn ensure_init_scoped_skips_oem() {
         let eng = Engine::ensure_init_scoped(Oem::None, true);
-        // abl_permissive has 5 patches.
-        assert_eq!(eng.table().len(), 5);
+        assert_eq!(eng.table().len(), 3);
         for p in eng.table() {
             assert_eq!(p.scope, PatchScope::AblPermissive);
         }
@@ -421,7 +427,6 @@ mod tests {
     #[test]
     fn ensure_init_scoped_includes_oem() {
         let eng = Engine::ensure_init_scoped(Oem::Oplus, true);
-        // oplus (1) + abl_permissive (5) = 6.
         assert_eq!(eng.table().len(), 6);
         assert_eq!(eng.table()[0].scope, PatchScope::OemOplus);
     }
@@ -430,15 +435,17 @@ mod tests {
     #[test]
     fn ensure_init_scoped_oem_only() {
         let eng = Engine::ensure_init_scoped(Oem::Oplus, false);
-        assert_eq!(eng.table().len(), 1);
-        assert_eq!(eng.table()[0].scope, PatchScope::OemOplus);
+        assert_eq!(eng.table().len(), 3);
+        for patch in eng.table() {
+            assert_eq!(patch.scope, PatchScope::OemOplus);
+        }
     }
 
     #[test]
-    fn firmware_engine_is_abl_permissive_only() {
-        // ensure_init (no-feature path) returns the abl_permissive table.
+    fn firmware_engine_detects_oplus_separately_from_common_table() {
         let eng = Engine::ensure_init();
-        assert_eq!(eng.table().len(), 5);
+        assert!(eng.detect_oplus);
+        assert_eq!(eng.table().len(), 3);
         for p in eng.table() {
             assert_eq!(p.scope, PatchScope::AblPermissive);
         }

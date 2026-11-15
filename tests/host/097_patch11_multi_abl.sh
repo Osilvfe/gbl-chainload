@@ -37,12 +37,8 @@ PATCHER=(gbl patch)
 OUT=tests/host/.last/097
 mkdir -p "$OUT"
 
-ALL_ABLS=(
-  tests/images/op15-infiniti-703-abl.img
-  tests/images/op15-infiniti-201-abl.img
-  tests/images/op15t-fairlady-201-abl.img
-  tests/images/xi17-pudding-44-abl.img
-)
+shopt -s nullglob
+ALL_ABLS=(tests/images/*-abl.img)
 
 ran=0
 

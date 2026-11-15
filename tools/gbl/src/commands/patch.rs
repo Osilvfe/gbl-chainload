@@ -31,8 +31,8 @@ pub struct Args {
     /// Anchor-uniqueness probe mode — fail only on a mandatory miss.
     #[arg(long)]
     check_anchors_only: bool,
-    /// OEM patch group to apply. `oplus` is canonical; `oneplus` is a
-    /// deprecation alias; `none` skips OEM patches.
+    /// OEM patch group to apply. `oplus` enables patch7/12/13; `oneplus`
+    /// is a deprecation alias; `none` (default) skips all three.
     #[arg(long, value_name = "ID")]
     oem: Option<String>,
     /// Deprecated no-op: the disabled-vbmeta cmdline edit is now part of

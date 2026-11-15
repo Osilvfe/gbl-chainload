@@ -45,6 +45,11 @@ if ! grep -qE 'patch6-lock-state-fastboot-gate .* -> OK' "$OUT/oplus.log"; then
 fi
 echo "  ok: --oem oplus applies patch7 + abl_permissive patches"
 
+for patch in patch12-boot-failure-fastboot-fallback patch13-slot-unbootable-inert; do
+    grep -qF "$patch [oem-oplus, optional] -> OK" "$OUT/oplus.log" \
+        || { echo "FAIL: $patch absent under --oem oplus"; cat "$OUT/oplus.log"; exit 1; }
+done
+
 # ---- Case 2: --oem oneplus (deprecation alias) -------------------------------
 "${PATCHER[@]}" --in "$PE" --oem oneplus --out "$OUT/oneplus.efi" >"$OUT/oneplus.log" 2>&1 \
     || { echo "FAIL: abl-patcher --oem oneplus returned non-zero"; cat "$OUT/oneplus.log"; exit 1; }
@@ -59,6 +64,7 @@ if ! grep -qE 'patch7-orange-screen .* -> OK' "$OUT/oneplus.log"; then
     exit 1
 fi
 echo "  ok: --oem oneplus prints deprecation msg, still maps to oplus"
+cmp "$OUT/oplus.efi" "$OUT/oneplus.efi"
 
 # ---- Case 3: plain invocation always applies abl_permissive ------------------
 "${PATCHER[@]}" --in "$PE" --out "$OUT/plain.efi" >"$OUT/plain.log" 2>&1 \
@@ -74,12 +80,20 @@ if ! grep -qE 'patch6-lock-state-fastboot-gate .* -> OK' "$OUT/plain.log"; then
     exit 1
 fi
 # Plain invocation must NOT pull in the OEM scope.
-if grep -qF 'patch7-orange-screen' "$OUT/plain.log"; then
-    echo "FAIL: oem patch7 present in plain (no --oem) run"
+if grep -qE 'patch(7|12|13)-' "$OUT/plain.log"; then
+    echo "FAIL: OEM patch present in plain (no --oem) run"
     cat "$OUT/plain.log"
     exit 1
 fi
 echo "  ok: plain invocation always applies abl_permissive (no OEM scope)"
+
+"${PATCHER[@]}" --in "$PE" --oem none --out "$OUT/none.efi" >"$OUT/none.log" 2>&1
+cmp "$OUT/plain.efi" "$OUT/none.efi"
+if grep -qE 'patch(7|12|13)-' "$OUT/none.log"; then
+    echo "FAIL: OEM patch present under --oem none"
+    cat "$OUT/none.log"
+    exit 1
+fi
 
 # ---- Case 4: --oem bad rejected with exit code 2 -----------------------------
 set +e

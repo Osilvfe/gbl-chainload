@@ -8,7 +8,7 @@
 #
 # Feature shape mirrors PR1:
 #   - `abl_permissive` module — always compiled (firmware + host).
-#   - `oem/oplus` module     — host-only via `#[cfg(feature = "host")]`.
+#   - `oem/oplus` module     — patch12/13 shared; patch7 is host-only.
 #   - `retired/*`            — host-only (reference impl, dead code).
 #
 # Builds as both an rlib (workspace consumers, parity tests) and a
