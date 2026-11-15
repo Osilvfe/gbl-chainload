@@ -103,6 +103,10 @@ def main():
     ap.add_argument("--abl", help="dumped ABL partition image")
     ap.add_argument("--mode", choices=("0", "1", "2"))
     ap.add_argument("--efi", help="base mode-N.efi")
+    ap.add_argument("--unixnu-efi", help="optional UniXNU.efi to embed as "
+                                        "a GBLP1 0x0030 payload")
+    ap.add_argument("--unixnu-loader-efi", help="optional DarwinBoot.efi loader "
+                                               "driver to embed as 0x0031")
     ap.add_argument("--stock-vbmeta", help="stock vbmeta image (mode 2 only)")
     ap.add_argument("--oem", help="OEM id for abl-patcher --oem "
                                   "(allowed for any --mode)")
@@ -136,6 +140,10 @@ def main():
     for f in (args.abl, args.efi):
         if not os.path.isfile(f):
             die(f"input not found: {f}")
+    if args.unixnu_efi and not os.path.isfile(args.unixnu_efi):
+        die(f"input not found: {args.unixnu_efi}")
+    if args.unixnu_loader_efi and not os.path.isfile(args.unixnu_loader_efi):
+        die(f"input not found: {args.unixnu_loader_efi}")
     if args.mode == "2":
         if not args.stock_vbmeta:
             die("--mode 2 requires --stock-vbmeta")
@@ -182,6 +190,10 @@ def main():
             run([gbl_bin, "mode2", "compile", toml, "-o", pbin],
                 "gbl mode2 compile")
             pack_extra = ["--mode2-profile", pbin]
+        if args.unixnu_efi:
+            pack_extra += ["--unixnu-efi", args.unixnu_efi]
+        if args.unixnu_loader_efi:
+            pack_extra += ["--unixnu-loader-efi", args.unixnu_loader_efi]
 
         # 4. pack the GBLP1 overlay — manifest bits derived from --mode.
         #   mode 0 → 0x00              (no capability bits set)

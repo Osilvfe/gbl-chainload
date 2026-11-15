@@ -9,6 +9,21 @@ GblPayload_LoadCachedAbl (IN  EFI_HANDLE  ImageHandle,
                           OUT VOID      **Pe,
                           OUT UINT32     *PeSize);
 
+/* Locate the embedded UniXNU PE32+ application (GBLP1 entry 0x0030).
+   *Efi is an AllocatePool copy owned by the caller. Returns EFI_NOT_FOUND
+   when the overlay has no UniXNU entry, and EFI_LOAD_ERROR when it is
+   present but malformed. */
+EFI_STATUS EFIAPI
+GblPayload_LoadUnixnuEfi (IN  EFI_HANDLE  ImageHandle,
+                          OUT VOID      **Efi,
+                          OUT UINT32     *EfiSize);
+
+/* Locate the embedded DarwinBoot loader driver (GBLP1 entry 0x0031). */
+EFI_STATUS EFIAPI
+GblPayload_LoadUnixnuLoaderEfi (IN  EFI_HANDLE  ImageHandle,
+                                OUT VOID      **Efi,
+                                OUT UINT32     *EfiSize);
+
 VOID EFIAPI
 GblPayload_LogProvenance (IN EFI_HANDLE  ImageHandle);
 

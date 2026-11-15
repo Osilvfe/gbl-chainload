@@ -10,7 +10,7 @@
 # Neither adjustment changes the source submodule.  Both are generated under
 # Build/, which is gitignored.
 #
-# Usage: scripts/build-native.sh [--release] [--output PATH]
+# Usage: scripts/build-native.sh [--release] [--output PATH] [--prepare-only]
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,10 +18,12 @@ cd "$REPO_ROOT"
 
 DEBUG=1
 OUTPUT=""
+PREPARE_ONLY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --release) DEBUG=0; shift ;;
     --output)  OUTPUT="${2:?--output requires a path}"; shift 2 ;;
+    --prepare-only) PREPARE_ONLY=1; shift ;;
     -h|--help)
       sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
@@ -45,7 +47,10 @@ command -v aarch64-linux-gnu-gcc >/dev/null || {
 # runs.  Keep every EDK2-side change in a tracked patch and apply it
 # idempotently instead of relying on the submodule worktree staying dirty.
 BOOTFIX_PATCH="$REPO_ROOT/scripts/edk2/gbl-edk2-fixes.patch"
-if git -C edk2 apply --reverse --check "$BOOTFIX_PATCH" 2>/dev/null; then
+# The fork now carries the fixes in commits.  A reverse-apply check breaks as
+# soon as an unrelated local FastbootLib edit overlaps the patch context, so
+# use a stable sentinel from the applied fix set instead.
+if grep -q 'SkipDtboOverlay' edk2/QcomModulePkg/Include/Library/BootLinux.h; then
   echo ">>> EDK2 fixes already applied"
 else
   echo ">>> applying EDK2 fixes"
@@ -87,10 +92,21 @@ mkdir -p "$EDK_TOOLS"
 for entry in edk2/BaseTools/*; do
   name="$(basename "$entry")"
   [[ "$name" == Scripts ]] && continue
-  ln -s "$entry" "$EDK_TOOLS/$name"
+  ln -s "$REPO_ROOT/$entry" "$EDK_TOOLS/$name"
 done
 cp -a edk2/BaseTools/Scripts "$EDK_TOOLS/Scripts"
 cp scripts/edk2/GccBase.lds "$EDK_TOOLS/Scripts/GccBase.lds"
+
+mkdir -p "$REPO_ROOT/Build/Conf"
+for template in target tools_def build_rule; do
+  if [[ ! -f "$REPO_ROOT/Build/Conf/$template.txt" ]]; then
+    cp "edk2/BaseTools/Conf/$template.template" "$REPO_ROOT/Build/Conf/$template.txt"
+  fi
+done
+if [[ "$PREPARE_ONLY" -eq 1 ]]; then
+  echo ">>> native EDK2 tools ready"
+  exit 0
+fi
 
 echo ">>> cargo staticlibs (aarch64-unknown-none)"
 for crate in gblp1 mode2-profile-core patch-engine avb-parse; do

@@ -51,6 +51,10 @@ pub enum GblPayloadStatus {
     BadManifestSchema = 20,
     BadManifestReserved = 21,
     BadManifestSize = 22,
+    /// The container is valid but has no `unixnu_efi` payload.
+    NoUnixnuEfi = 23,
+    /// The container is valid but has no `unixnu_loader_efi` payload.
+    NoUnixnuLoaderEfi = 24,
 }
 
 impl From<ParseError> for GblPayloadStatus {
@@ -188,6 +192,66 @@ pub unsafe extern "C" fn gbl_payload_find_mode2_profile(
     }
 }
 
+/// C ABI: parse + find the unique `unixnu_efi` entry.
+///
+/// # Safety
+/// As [`gbl_payload_find_cached_abl`].
+#[no_mangle]
+pub unsafe extern "C" fn gbl_payload_find_unixnu_efi(
+    bytes: *const u8,
+    size: usize,
+    out_efi: *mut *const u8,
+    out_size: *mut usize,
+) -> GblPayloadStatus {
+    let buf = slice_or_empty(bytes, size);
+    let container = match parse(buf) {
+        Ok(c) => c,
+        Err(e) => return e.into(),
+    };
+    match container.find_unixnu_efi() {
+        Some(efi) => {
+            if !out_efi.is_null() {
+                *out_efi = efi.as_ptr();
+            }
+            if !out_size.is_null() {
+                *out_size = efi.len();
+            }
+            GblPayloadStatus::Ok
+        }
+        None => GblPayloadStatus::NoUnixnuEfi,
+    }
+}
+
+/// C ABI: parse + find the unique UniXNU loader-driver entry.
+///
+/// # Safety
+/// As [`gbl_payload_find_cached_abl`].
+#[no_mangle]
+pub unsafe extern "C" fn gbl_payload_find_unixnu_loader_efi(
+    bytes: *const u8,
+    size: usize,
+    out_efi: *mut *const u8,
+    out_size: *mut usize,
+) -> GblPayloadStatus {
+    let buf = slice_or_empty(bytes, size);
+    let container = match parse(buf) {
+        Ok(c) => c,
+        Err(e) => return e.into(),
+    };
+    match container.find_unixnu_loader_efi() {
+        Some(efi) => {
+            if !out_efi.is_null() {
+                *out_efi = efi.as_ptr();
+            }
+            if !out_size.is_null() {
+                *out_size = efi.len();
+            }
+            GblPayloadStatus::Ok
+        }
+        None => GblPayloadStatus::NoUnixnuLoaderEfi,
+    }
+}
+
 /// C ABI: scan for a GBLP1 container, tolerating stray copies of the
 /// magic, then locate the cached_abl entry.
 ///
@@ -216,6 +280,69 @@ pub unsafe extern "C" fn gbl_payload_scan_cached_abl(
                 buf.len() - i,
                 out_pe,
                 out_pe_size,
+            );
+            if matches!(st, GblPayloadStatus::Ok) {
+                return GblPayloadStatus::Ok;
+            }
+            last = st;
+        }
+        i += 1;
+    }
+    last
+}
+
+/// C ABI: scan for a GBLP1 container, tolerating stray copies of the
+/// magic, then locate the `unixnu_efi` entry.
+///
+/// # Safety
+/// As [`gbl_payload_find_cached_abl`].
+#[no_mangle]
+pub unsafe extern "C" fn gbl_payload_scan_unixnu_efi(
+    bytes: *const u8,
+    size: usize,
+    out_efi: *mut *const u8,
+    out_size: *mut usize,
+) -> GblPayloadStatus {
+    let buf = slice_or_empty(bytes, size);
+    let mut last = GblPayloadStatus::BadMagic;
+    let magic = &crate::GBLP1_MAGIC[..];
+    let mut i = 0;
+    while i + crate::GBLP1_MAGIC_SIZE <= buf.len() {
+        if buf[i] == b'G' && buf[i..i + crate::GBLP1_MAGIC_SIZE] == *magic {
+            let st =
+                gbl_payload_find_unixnu_efi(buf.as_ptr().add(i), buf.len() - i, out_efi, out_size);
+            if matches!(st, GblPayloadStatus::Ok) {
+                return GblPayloadStatus::Ok;
+            }
+            last = st;
+        }
+        i += 1;
+    }
+    last
+}
+
+/// C ABI: scan for the UniXNU loader-driver entry.
+///
+/// # Safety
+/// As [`gbl_payload_find_cached_abl`].
+#[no_mangle]
+pub unsafe extern "C" fn gbl_payload_scan_unixnu_loader_efi(
+    bytes: *const u8,
+    size: usize,
+    out_efi: *mut *const u8,
+    out_size: *mut usize,
+) -> GblPayloadStatus {
+    let buf = slice_or_empty(bytes, size);
+    let mut last = GblPayloadStatus::BadMagic;
+    let magic = &crate::GBLP1_MAGIC[..];
+    let mut i = 0;
+    while i + crate::GBLP1_MAGIC_SIZE <= buf.len() {
+        if buf[i] == b'G' && buf[i..i + crate::GBLP1_MAGIC_SIZE] == *magic {
+            let st = gbl_payload_find_unixnu_loader_efi(
+                buf.as_ptr().add(i),
+                buf.len() - i,
+                out_efi,
+                out_size,
             );
             if matches!(st, GblPayloadStatus::Ok) {
                 return GblPayloadStatus::Ok;
@@ -445,5 +572,7 @@ mod tests {
         assert_eq!(GblPayloadStatus::BadManifestSchema as i32, 20);
         assert_eq!(GblPayloadStatus::BadManifestReserved as i32, 21);
         assert_eq!(GblPayloadStatus::BadManifestSize as i32, 22);
+        assert_eq!(GblPayloadStatus::NoUnixnuEfi as i32, 23);
+        assert_eq!(GblPayloadStatus::NoUnixnuLoaderEfi as i32, 24);
     }
 }

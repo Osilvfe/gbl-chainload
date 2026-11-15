@@ -214,6 +214,127 @@ fn cached_abl_round_trip_via_pack_then_parse() {
 }
 
 #[test]
+fn unixnu_efi_round_trip_via_pack_then_parse() {
+    let mut efi = vec![0u8; 128];
+    efi[0] = b'M';
+    efi[1] = b'Z';
+    let inputs = PackInputs {
+        unixnu_efi: Some(&efi),
+        ..Default::default()
+    };
+    let buf = pack(&inputs).expect("pack");
+    let c = parse(&buf).expect("parse");
+    assert_eq!(c.find_unixnu_efi().unwrap(), &efi[..]);
+}
+
+#[test]
+fn unixnu_loader_efi_round_trip_via_pack_then_parse() {
+    let mut efi = vec![0u8; 128];
+    efi[0] = b'M';
+    efi[1] = b'Z';
+    let inputs = PackInputs {
+        unixnu_loader_efi: Some(&efi),
+        ..Default::default()
+    };
+    let buf = pack(&inputs).expect("pack");
+    let c = parse(&buf).expect("parse");
+    assert_eq!(c.find_unixnu_loader_efi().unwrap(), &efi[..]);
+}
+
+#[test]
+fn unixnu_ffi_scans_full_container_and_rejects_corruption() {
+    use gblp1::ffi::*;
+
+    let mut application = vec![0u8; 128];
+    application[..2].copy_from_slice(b"MZ");
+    let mut loader = vec![0u8; 256];
+    loader[..2].copy_from_slice(b"MZ");
+    let cached_abl = vec![0x42u8; 512];
+    let mut profile = vec![0u8; 120];
+    profile[..4].copy_from_slice(b"GM2P");
+    let container = pack(&PackInputs {
+        cached_abl: Some(&cached_abl),
+        mode2_profile: Some(&profile),
+        unixnu_efi: Some(&application),
+        unixnu_loader_efi: Some(&loader),
+        manifest_cap_bits: Some(2),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(u32::from_le_bytes(container[20..24].try_into().unwrap()), 6);
+    let mut prefixed = b"GBLP1\0\0\0junk".to_vec();
+    prefixed.extend_from_slice(&container);
+    let mut found = core::ptr::null();
+    let mut found_size = 0;
+    unsafe {
+        assert_eq!(
+            gbl_payload_scan_unixnu_efi(
+                prefixed.as_ptr(),
+                prefixed.len(),
+                &mut found,
+                &mut found_size,
+            ),
+            GblPayloadStatus::Ok
+        );
+        assert_eq!(core::slice::from_raw_parts(found, found_size), application);
+        assert_eq!(
+            gbl_payload_scan_unixnu_loader_efi(
+                prefixed.as_ptr(),
+                prefixed.len(),
+                &mut found,
+                &mut found_size,
+            ),
+            GblPayloadStatus::Ok
+        );
+        assert_eq!(core::slice::from_raw_parts(found, found_size), loader);
+    }
+    let loader_offset = found as usize - prefixed.as_ptr() as usize;
+    prefixed[loader_offset] ^= 1;
+    assert_eq!(
+        unsafe {
+            gbl_payload_scan_unixnu_loader_efi(
+                prefixed.as_ptr(),
+                prefixed.len(),
+                &mut found,
+                &mut found_size,
+            )
+        },
+        GblPayloadStatus::EntryShaMismatch
+    );
+}
+
+#[test]
+fn unixnu_ffi_reports_missing_entries() {
+    use gblp1::ffi::*;
+
+    let container = pack(&PackInputs {
+        manifest_cap_bits: Some(0),
+        ..Default::default()
+    })
+    .unwrap();
+    unsafe {
+        assert_eq!(
+            gbl_payload_find_unixnu_efi(
+                container.as_ptr(),
+                container.len(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            ),
+            GblPayloadStatus::NoUnixnuEfi
+        );
+        assert_eq!(
+            gbl_payload_find_unixnu_loader_efi(
+                container.as_ptr(),
+                container.len(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            ),
+            GblPayloadStatus::NoUnixnuLoaderEfi
+        );
+    }
+}
+
+#[test]
 fn scan_tolerates_stray_magic_prefix() {
     // Build a valid container with a stray copy of GBLP1\0\0\0 in front
     // of it. scan_for_container must skip past the stray and land on

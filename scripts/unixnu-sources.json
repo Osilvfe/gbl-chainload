@@ -1,0 +1,10 @@
+{
+  "unixnu": {
+    "url": "https://github.com/UniXNU/UniXNU.git",
+    "revision": "16e592abee8a550dec8154ed1f38b5ebc4f16213"
+  },
+  "darwinboot": {
+    "url": "https://github.com/UniXNU/DarwinBoot.git",
+    "revision": "3325e352d7df68a9f9ad74832ed94a6acbbd7390"
+  }
+}
