@@ -34,6 +34,12 @@ pub struct Args {
     /// Optional mode-2 profile binary (type 0x0010 entry).
     #[arg(long)]
     mode2_profile: Option<PathBuf>,
+    /// Optional UniXNU PE32+ application (type 0x0030 entry).
+    #[arg(long)]
+    unixnu_efi: Option<PathBuf>,
+    /// Optional DarwinBoot loader driver for UniXNU (type 0x0031 entry).
+    #[arg(long)]
+    unixnu_loader_efi: Option<PathBuf>,
     /// Optional manifest entry capability bits (type 0x0020).
     #[arg(long, value_name = "BITS")]
     manifest: Option<String>,
@@ -45,11 +51,14 @@ pub struct Args {
 pub fn run(args: Args) -> Result<(), GblError> {
     if args.cached_abl.is_none()
         && args.mode2_profile.is_none()
+        && args.unixnu_efi.is_none()
+        && args.unixnu_loader_efi.is_none()
         && args.manifest.is_none()
     {
         return Err(GblError::usage(
             "usage: gbl pack --out OUT [--cached-abl PE --source RAW --extracted PE] \
-             [--mode2-profile BIN] [--manifest BITS]"
+             [--mode2-profile BIN] [--unixnu-efi PE] [--unixnu-loader-efi PE] \
+             [--manifest BITS]"
                 .to_string(),
         ));
     }
@@ -73,6 +82,8 @@ pub fn run(args: Args) -> Result<(), GblError> {
     let source = args.source.as_deref().map(slurp).transpose()?;
     let extracted = args.extracted.as_deref().map(slurp).transpose()?;
     let profile = args.mode2_profile.as_deref().map(slurp).transpose()?;
+    let unixnu = args.unixnu_efi.as_deref().map(slurp).transpose()?;
+    let unixnu_loader = args.unixnu_loader_efi.as_deref().map(slurp).transpose()?;
 
     // PE sanity hard-reject for cached_abl (the C tool calls
     // gbl_pe_sanity() in pack.c). Note: the firmware's runtime
@@ -96,6 +107,23 @@ pub fn run(args: Args) -> Result<(), GblError> {
         }
     }
 
+    if let Some(efi) = unixnu.as_deref() {
+        pe_utils::pe_sanity(efi).map_err(|e| {
+            GblError::runtime(format!(
+                "gbl-pack: PE sanity failed for unixnu_efi ({:?})",
+                e
+            ))
+        })?;
+    }
+    if let Some(efi) = unixnu_loader.as_deref() {
+        pe_utils::pe_sanity_driver(efi).map_err(|e| {
+            GblError::runtime(format!(
+                "gbl-pack: PE sanity failed for unixnu_loader_efi ({:?})",
+                e
+            ))
+        })?;
+    }
+
     // Timestamp string — honor SOURCE_DATE_EPOCH (reproducible-builds).
     let ts = iso8601_utc_now()?;
     // The packer_version string is part of the SOURCE_META entry — its
@@ -113,6 +141,8 @@ pub fn run(args: Args) -> Result<(), GblError> {
         source: source.as_deref(),
         extracted: extracted.as_deref(),
         mode2_profile: profile.as_deref(),
+        unixnu_efi: unixnu.as_deref(),
+        unixnu_loader_efi: unixnu_loader.as_deref(),
         manifest_cap_bits: manifest_bits,
         packer_version: Some(&packer_version),
         timestamp_iso8601: Some(&ts),

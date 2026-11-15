@@ -108,6 +108,8 @@ fn type_name(t: u16) -> &'static str {
         gblp1::GBLP1_TYPE_SOURCE_META => "SOURCE_META",
         gblp1::GBLP1_TYPE_MODE2_PROFILE => "MODE2_PROFILE",
         gblp1::GBLP1_TYPE_MANIFEST => "manifest",
+        gblp1::GBLP1_TYPE_UNIXNU_EFI => "UNIXNU_EFI",
+        gblp1::GBLP1_TYPE_UNIXNU_LOADER_EFI => "UNIXNU_LOADER_EFI",
         _ => "UNKNOWN",
     }
 }

@@ -92,6 +92,11 @@ Useful commands:
 - `fastboot stage <file>` — stage an image for `boot`, `oem boot-efi`, or other staged-data commands.
 - `fastboot oem escape` — leave gbl-chainload FastbootLib and continue into patched ABL.
 - `fastboot oem boot-efi` — boot the currently staged EFI image with `LoadImage()` / `StartImage()`.
+- `fastboot oem boot-unixnu` — publish the currently staged raw FAT image as a
+  read-only 512-byte-sector RAM disk, mark it as UniXNU's embedded payload
+  volume, and start the UniXNU PE embedded in the GBLP1 overlay. The FAT must
+  contain `\EFI\UniXNU\unixnu.toml`. Normal boot, timeout, and volume keys never
+  call this command; Android remains the default.
 - `fastboot oem oem-unlock-toggle` — enable the FRP OEM-unlock-allowed bit; second use is a no-op.
 - `fastboot flashing lock` / `fastboot flashing unlock` — update DevInfo lock state while skipping forced recovery wipe.
 
@@ -102,6 +107,31 @@ Fastboot screen additions:
 - `AVB WARNING - ...` warning line when lightweight vbmeta probing detects a risky state.
 - `Enable OEM unlock` menu action.
 - `Escape` menu action.
+
+The staged-FAT UniXNU path is driven explicitly:
+
+```bash
+fastboot stage /path/to/efisp-with-unixnu.efi
+fastboot oem boot-efi
+# GBL FastbootLib is now running
+fastboot stage /path/to/payload.fat
+fastboot oem boot-unixnu
+```
+
+Build the embedded components from pinned sources with the same CLO edk2
+submodule used by GBL:
+
+```bash
+scripts/build-unixnu.sh
+# optional: scripts/build-unixnu.sh --debug
+```
+
+The default outputs are `Build/unixnu/RELEASE/UniXNU.efi` and
+`Build/unixnu/RELEASE/DarwinBoot.efi`. Pass them to `scripts/efisp-package.py`
+using `--unixnu-efi` and `--unixnu-loader-efi`. Source revisions, packaging
+and the fairlady hardware results are documented in
+[UniXNU integration](docs/notes/unixnu-clo-r25.md). No prebuilt EFI, FAT image
+or device payload is tracked for this feature.
 
 There is also an untested `Boot ESP` menu option intended for directly booting operating systems from USB.
 

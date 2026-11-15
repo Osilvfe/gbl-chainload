@@ -59,6 +59,7 @@ profiles/*/[!manifest]*.bin
 
 # Device test logs
 logs/
+/log.txt
 
 # RE staging (transient)
 .re-notes-staging/

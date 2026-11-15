@@ -71,6 +71,7 @@ const PE_MAGIC_BYTES: u32 = 0x0000_4550; // "PE\0\0"
 const MACHINE_AARCH64: u16 = 0xAA64;
 const OPT_MAGIC_PE32P: u16 = 0x020B;
 const SUBSYSTEM_EFI_APP: u16 = 10;
+const SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER: u16 = 11;
 
 const MIN_SIZE: usize = 0x200;
 
@@ -94,6 +95,18 @@ fn le32(b: &[u8]) -> u32 {
 ///
 /// Byte-for-byte parity with `gbl_pe_sanity` in `PeSanity.c`.
 pub fn pe_sanity(pe: &[u8]) -> Result<(), PeError> {
+    pe_sanity_with_subsystem(pe, SUBSYSTEM_EFI_APP)
+}
+
+/// Host-side AArch64 EFI boot-service-driver sanity check.
+///
+/// Identical to [`pe_sanity`] except the PE subsystem must be
+/// `EFI_BOOT_SERVICE_DRIVER` (11), used for embedded `DarwinBoot.efi`.
+pub fn pe_sanity_driver(pe: &[u8]) -> Result<(), PeError> {
+    pe_sanity_with_subsystem(pe, SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER)
+}
+
+fn pe_sanity_with_subsystem(pe: &[u8], expected_subsystem: u16) -> Result<(), PeError> {
     let size = pe.len();
     if size < MIN_SIZE {
         return Err(PeError::TooSmall);
@@ -141,7 +154,9 @@ pub fn pe_sanity(pe: &[u8]) -> Result<(), PeError> {
     if le16(&pe[opt + OPT_MAGIC_OFF..opt + OPT_MAGIC_OFF + 2]) != OPT_MAGIC_PE32P {
         return Err(PeError::BadOptMagic);
     }
-    if le16(&pe[opt + OPT_SUBSYSTEM_OFF..opt + OPT_SUBSYSTEM_OFF + 2]) != SUBSYSTEM_EFI_APP {
+    if le16(&pe[opt + OPT_SUBSYSTEM_OFF..opt + OPT_SUBSYSTEM_OFF + 2])
+        != expected_subsystem
+    {
         return Err(PeError::BadSubsys);
     }
 
@@ -203,6 +218,15 @@ mod tests {
     fn sane_pe_passes() {
         let p = build_sane_pe();
         assert_eq!(pe_sanity(&p), Ok(()));
+    }
+
+    #[test]
+    fn driver_subsystem_passes_driver_check_only() {
+        let mut driver = build_sane_pe();
+        assert_eq!(pe_sanity_driver(&driver), Err(PeError::BadSubsys));
+        driver[0xDC] = 11;
+        assert_eq!(pe_sanity_driver(&driver), Ok(()));
+        assert_eq!(pe_sanity(&driver), Err(PeError::BadSubsys));
     }
 
     #[test]

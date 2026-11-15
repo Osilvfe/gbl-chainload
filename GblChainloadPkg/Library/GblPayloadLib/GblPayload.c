@@ -46,6 +46,87 @@ GblPayload_LoadCachedAbl (IN EFI_HANDLE ImageHandle,
   return EFI_SUCCESS;
 }
 
+EFI_STATUS EFIAPI
+GblPayload_LoadUnixnuEfi (IN EFI_HANDLE ImageHandle,
+                          OUT VOID **Efi, OUT UINT32 *EfiSize) {
+  VOID *Bytes = NULL; UINTN Size = 0;
+  if (Efi == NULL || EfiSize == NULL) return EFI_INVALID_PARAMETER;
+
+  EFI_STATUS Status = LocateOverlayBytes(&Bytes, &Size);
+  if (EFI_ERROR(Status)) {
+    GBL_INFO("gbl-payload: unixnu - no overlay bytes (%r)\n", Status);
+    return EFI_NOT_FOUND;
+  }
+
+  CONST UINT8 *UnixnuPe = NULL; size_t UnixnuSize = 0;
+  enum gbl_payload_status PS =
+      gbl_payload_scan_unixnu_efi((CONST UINT8 *)Bytes, Size,
+                                  &UnixnuPe, &UnixnuSize);
+  if (PS == GBL_PAYLOAD_NO_UNIXNU_EFI || PS == GBL_PAYLOAD_BAD_MAGIC) {
+    GBL_INFO("gbl-payload: unixnu - entry absent (status=%d)\n", (int)PS);
+    return EFI_NOT_FOUND;
+  }
+  if (PS != GBL_PAYLOAD_OK) {
+    GBL_INFO("gbl-payload: unixnu - container invalid (status=%d)\n", (int)PS);
+    return EFI_LOAD_ERROR;
+  }
+  if (UnixnuSize < 64 || UnixnuPe[0] != 'M' || UnixnuPe[1] != 'Z') {
+    GBL_INFO("gbl-payload: unixnu - payload is not a PE image\n");
+    return EFI_LOAD_ERROR;
+  }
+
+  VOID *Copy = AllocatePool(UnixnuSize);
+  if (!Copy) return EFI_OUT_OF_RESOURCES;
+  CopyMem(Copy, UnixnuPe, UnixnuSize);
+
+  *Efi = Copy;
+  *EfiSize = (UINT32)UnixnuSize;
+  GBL_INFO("gbl-payload: unixnu - loaded embedded PE (%u bytes)\n",
+           *EfiSize);
+  return EFI_SUCCESS;
+}
+
+EFI_STATUS EFIAPI
+GblPayload_LoadUnixnuLoaderEfi (IN EFI_HANDLE ImageHandle,
+                                OUT VOID **Efi, OUT UINT32 *EfiSize) {
+  VOID *Bytes = NULL; UINTN Size = 0;
+  if (Efi == NULL || EfiSize == NULL) return EFI_INVALID_PARAMETER;
+
+  EFI_STATUS Status = LocateOverlayBytes(&Bytes, &Size);
+  if (EFI_ERROR(Status)) {
+    GBL_INFO("gbl-payload: unixnu-loader - no overlay bytes (%r)\n", Status);
+    return EFI_NOT_FOUND;
+  }
+
+  CONST UINT8 *LoaderPe = NULL; size_t LoaderSize = 0;
+  enum gbl_payload_status PS =
+      gbl_payload_scan_unixnu_loader_efi((CONST UINT8 *)Bytes, Size,
+                                         &LoaderPe, &LoaderSize);
+  if (PS == GBL_PAYLOAD_NO_UNIXNU_LOADER_EFI || PS == GBL_PAYLOAD_BAD_MAGIC) {
+    GBL_INFO("gbl-payload: unixnu-loader - entry absent (status=%d)\n", (int)PS);
+    return EFI_NOT_FOUND;
+  }
+  if (PS != GBL_PAYLOAD_OK) {
+    GBL_INFO("gbl-payload: unixnu-loader - container invalid (status=%d)\n",
+             (int)PS);
+    return EFI_LOAD_ERROR;
+  }
+  if (LoaderSize < 64 || LoaderPe[0] != 'M' || LoaderPe[1] != 'Z') {
+    GBL_INFO("gbl-payload: unixnu-loader - payload is not a PE image\n");
+    return EFI_LOAD_ERROR;
+  }
+
+  VOID *Copy = AllocatePool(LoaderSize);
+  if (!Copy) return EFI_OUT_OF_RESOURCES;
+  CopyMem(Copy, LoaderPe, LoaderSize);
+
+  *Efi = Copy;
+  *EfiSize = (UINT32)LoaderSize;
+  GBL_INFO("gbl-payload: unixnu-loader - loaded embedded PE (%u bytes)\n",
+           *EfiSize);
+  return EFI_SUCCESS;
+}
+
 VOID EFIAPI
 GblPayload_LogProvenance (IN EFI_HANDLE ImageHandle) {
   /* For v1, log only the source. Walking source_meta is optional and

@@ -65,6 +65,8 @@ extern "C" {
 #define GBLP1_TYPE_SOURCE_META   0x0002u
 #define GBLP1_TYPE_MODE2_PROFILE 0x0010u  /* mode-2 profile (GM2P) */
 #define GBLP1_TYPE_MANIFEST      0x0020u  /* engine capability manifest (GMAN) */
+#define GBLP1_TYPE_UNIXNU_EFI    0x0030u  /* UniXNU PE32+ second stage */
+#define GBLP1_TYPE_UNIXNU_LOADER_EFI 0x0031u /* DarwinBoot loader driver */
 
 /* Manifest payload (16 bytes; little-endian).
    Layout: magic[4] | schema_version u16 | cap_bits u16 | reserved_pad[8] */
@@ -141,7 +143,9 @@ enum gbl_payload_status {
     GBL_PAYLOAD_BAD_MANIFEST_MAGIC     = 19,
     GBL_PAYLOAD_BAD_MANIFEST_SCHEMA    = 20,
     GBL_PAYLOAD_BAD_MANIFEST_RESERVED  = 21,
-    GBL_PAYLOAD_BAD_MANIFEST_SIZE      = 22
+    GBL_PAYLOAD_BAD_MANIFEST_SIZE      = 22,
+    GBL_PAYLOAD_NO_UNIXNU_EFI          = 23,
+    GBL_PAYLOAD_NO_UNIXNU_LOADER_EFI   = 24
 };
 
 /* ---- Parser API ------------------------------------------------------- */
@@ -162,6 +166,16 @@ gbl_payload_find_mode2_profile(const uint8_t *bytes, size_t size,
                                const uint8_t **out_profile,
                                size_t *out_size);
 
+/* Same as find_cached_abl but for the UNIXNU_EFI entry. */
+enum gbl_payload_status
+gbl_payload_find_unixnu_efi(const uint8_t *bytes, size_t size,
+                            const uint8_t **out_efi, size_t *out_size);
+
+/* Same as find_cached_abl but for the UNIXNU_LOADER_EFI entry. */
+enum gbl_payload_status
+gbl_payload_find_unixnu_loader_efi(const uint8_t *bytes, size_t size,
+                                   const uint8_t **out_efi, size_t *out_size);
+
 /* Scan bytes[0..size) for a GBLP1 container, tolerating stray copies
  * of the 8-byte magic. Returns the FIRST occurrence that fully
  * validates, the last non-OK status if the magic was seen but none
@@ -169,6 +183,16 @@ gbl_payload_find_mode2_profile(const uint8_t *bytes, size_t size,
 enum gbl_payload_status
 gbl_payload_scan_cached_abl(const uint8_t *bytes, size_t size,
                             const uint8_t **out_pe, size_t *out_pe_size);
+
+/* Scan bytes[0..size) for a GBLP1 container and locate UNIXNU_EFI. */
+enum gbl_payload_status
+gbl_payload_scan_unixnu_efi(const uint8_t *bytes, size_t size,
+                            const uint8_t **out_efi, size_t *out_size);
+
+/* Scan bytes[0..size) for a GBLP1 container and locate UNIXNU_LOADER_EFI. */
+enum gbl_payload_status
+gbl_payload_scan_unixnu_loader_efi(const uint8_t *bytes, size_t size,
+                                   const uint8_t **out_efi, size_t *out_size);
 
 /* Engine capability manifest. cap_bits is the raw bit field from the
  * wire, validated against GBLP1_MANIFEST_BITS_RESERVED_MASK but

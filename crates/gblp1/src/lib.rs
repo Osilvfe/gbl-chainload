@@ -74,6 +74,11 @@ pub const GBLP1_TYPE_CACHED_ABL: u16 = 0x0001;
 pub const GBLP1_TYPE_SOURCE_META: u16 = 0x0002;
 pub const GBLP1_TYPE_MODE2_PROFILE: u16 = 0x0010;
 pub const GBLP1_TYPE_MANIFEST: u16 = 0x0020;
+/// Raw `UniXNU.efi` PE32+ application, loaded by GBL and started as a
+/// second-stage UEFI boot manager.
+pub const GBLP1_TYPE_UNIXNU_EFI: u16 = 0x0030;
+/// `DarwinBoot.efi` UEFI driver implementing UniXNU's loader protocol.
+pub const GBLP1_TYPE_UNIXNU_LOADER_EFI: u16 = 0x0031;
 
 pub const GBLP1_MANIFEST_MAGIC: &[u8; 4] = b"GMAN";
 pub const GBLP1_MANIFEST_MAGIC_SIZE: usize = 4;
@@ -162,6 +167,16 @@ impl<'a> Container<'a> {
     /// Find the unique `mode2_profile` entry (type 0x0010).
     pub fn find_mode2_profile(&self) -> Option<&'a [u8]> {
         self.find(GBLP1_TYPE_MODE2_PROFILE)
+    }
+
+    /// Find the unique `unixnu_efi` entry (type 0x0030).
+    pub fn find_unixnu_efi(&self) -> Option<&'a [u8]> {
+        self.find(GBLP1_TYPE_UNIXNU_EFI)
+    }
+
+    /// Find the unique `unixnu_loader_efi` entry (type 0x0031).
+    pub fn find_unixnu_loader_efi(&self) -> Option<&'a [u8]> {
+        self.find(GBLP1_TYPE_UNIXNU_LOADER_EFI)
     }
 
     /// Find + validate the unique `manifest` entry (type 0x0020).
@@ -334,7 +349,11 @@ pub fn parse(bytes: &[u8]) -> Result<Container<'_>, ParseError> {
         // return ENTRY_BAD_TYPE; }` check.
         if matches!(
             type_,
-            GBLP1_TYPE_CACHED_ABL | GBLP1_TYPE_MODE2_PROFILE | GBLP1_TYPE_MANIFEST
+            GBLP1_TYPE_CACHED_ABL
+                | GBLP1_TYPE_MODE2_PROFILE
+                | GBLP1_TYPE_UNIXNU_EFI
+                | GBLP1_TYPE_UNIXNU_LOADER_EFI
+                | GBLP1_TYPE_MANIFEST
         ) {
             for j in 0..seen_count {
                 if seen_types[j] == type_ {
@@ -419,6 +438,8 @@ pub struct PackInputs<'a> {
     pub source: Option<&'a [u8]>,
     pub extracted: Option<&'a [u8]>,
     pub mode2_profile: Option<&'a [u8]>,
+    pub unixnu_efi: Option<&'a [u8]>,
+    pub unixnu_loader_efi: Option<&'a [u8]>,
     pub manifest_cap_bits: Option<u16>,
     pub packer_version: Option<&'a str>,
     pub timestamp_iso8601: Option<&'a str>,
@@ -443,8 +464,10 @@ pub enum PackError {
 pub fn pack(inputs: &PackInputs<'_>) -> Result<Vec<u8>, PackError> {
     let have_cached = matches!(inputs.cached_abl, Some(b) if !b.is_empty());
     let have_profile = matches!(inputs.mode2_profile, Some(b) if !b.is_empty());
+    let have_unixnu = matches!(inputs.unixnu_efi, Some(b) if !b.is_empty());
+    let have_unixnu_loader = matches!(inputs.unixnu_loader_efi, Some(b) if !b.is_empty());
     let have_manifest = inputs.manifest_cap_bits.is_some();
-    if !have_cached && !have_profile && !have_manifest {
+    if !have_cached && !have_profile && !have_unixnu && !have_unixnu_loader && !have_manifest {
         return Err(PackError::BadInput);
     }
     if have_profile {
@@ -467,6 +490,18 @@ pub fn pack(inputs: &PackInputs<'_>) -> Result<Vec<u8>, PackError> {
             return Err(PackError::ManifestBad);
         }
     }
+    if let Some(efi) = inputs.unixnu_efi {
+        // Structural check only; the host packer runs the full
+        // `pe_utils::pe_sanity` before calling this.
+        if efi.len() < 64 || &efi[0..2] != b"MZ" {
+            return Err(PackError::BadInput);
+        }
+    }
+    if let Some(efi) = inputs.unixnu_loader_efi {
+        if efi.len() < 64 || &efi[0..2] != b"MZ" {
+            return Err(PackError::BadInput);
+        }
+    }
 
     let pv_len = inputs.packer_version.map(str::len).unwrap_or(0);
     let ts_len = inputs.timestamp_iso8601.map(str::len).unwrap_or(0);
@@ -478,7 +513,7 @@ pub fn pack(inputs: &PackInputs<'_>) -> Result<Vec<u8>, PackError> {
         type_: u16,
         size: usize,
     }
-    let mut ents: [EntPlan; 4] = [EntPlan { type_: 0, size: 0 }; 4];
+    let mut ents: [EntPlan; 6] = [EntPlan { type_: 0, size: 0 }; 6];
     let mut ec = 0usize;
     if have_cached {
         ents[ec] = EntPlan {
@@ -499,6 +534,20 @@ pub fn pack(inputs: &PackInputs<'_>) -> Result<Vec<u8>, PackError> {
         };
         ec += 1;
     }
+    if have_unixnu {
+        ents[ec] = EntPlan {
+            type_: GBLP1_TYPE_UNIXNU_EFI,
+            size: inputs.unixnu_efi.unwrap().len(),
+        };
+        ec += 1;
+    }
+    if have_unixnu_loader {
+        ents[ec] = EntPlan {
+            type_: GBLP1_TYPE_UNIXNU_LOADER_EFI,
+            size: inputs.unixnu_loader_efi.unwrap().len(),
+        };
+        ec += 1;
+    }
     if have_manifest {
         ents[ec] = EntPlan {
             type_: GBLP1_TYPE_MANIFEST,
@@ -509,7 +558,7 @@ pub fn pack(inputs: &PackInputs<'_>) -> Result<Vec<u8>, PackError> {
 
     let entries_end = GBLP1_HEADER_SIZE + ec * GBLP1_ENTRY_SIZE;
     let mut off = align_up(entries_end, GBLP1_PAYLOAD_ALIGN);
-    let mut payload_off: [usize; 4] = [0; 4];
+    let mut payload_off: [usize; 6] = [0; 6];
     for i in 0..ec {
         payload_off[i] = off;
         off = align_up(off + ents[i].size, GBLP1_PAYLOAD_ALIGN);
@@ -579,6 +628,14 @@ pub fn pack(inputs: &PackInputs<'_>) -> Result<Vec<u8>, PackError> {
             }
             GBLP1_TYPE_MODE2_PROFILE => {
                 let src = inputs.mode2_profile.unwrap();
+                buf[poff..poff + src.len()].copy_from_slice(src);
+            }
+            GBLP1_TYPE_UNIXNU_EFI => {
+                let src = inputs.unixnu_efi.unwrap();
+                buf[poff..poff + src.len()].copy_from_slice(src);
+            }
+            GBLP1_TYPE_UNIXNU_LOADER_EFI => {
+                let src = inputs.unixnu_loader_efi.unwrap();
                 buf[poff..poff + src.len()].copy_from_slice(src);
             }
             GBLP1_TYPE_MANIFEST => {
