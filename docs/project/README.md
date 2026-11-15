@@ -8,6 +8,7 @@ This folder is the source of truth for project documentation, reverse-engineerin
 - [`next-milestone.md`](next-milestone.md) — current milestone objectives, explicit de-scope list, and acceptance criteria.
 - [`re-findings.md`](re-findings.md) — distilled reverse-engineering facts that should survive beyond session notes.
 - [`decisions.md`](decisions.md) — durable decisions and rejected paths.
+- [`upstream-issues.md`](upstream-issues.md) — snapshot and disposition of open upstream issues/PRs.
 
 ## Documentation policy
 

@@ -23,5 +23,6 @@ Progress marker: **v2 shim is usable for mode-0 and mode-1; next milestone is th
 
 - Branch policy: feature branches and PRs only; no direct work on `main`.
 - Current docs are consolidated under `docs/project/`.
+- Open upstream issues are triaged in `docs/project/upstream-issues.md` (2026-11-15 snapshot).
 - Historical docs, old Phase-1 plans, and RE session transcripts have been deleted after distillation; `.re-notes/README.md` remains only as a redirect for RE-agent discovery.
 - Test fixture documentation remains in `tests/images/README.md` because it describes live test assets rather than project planning.
