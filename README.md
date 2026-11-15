@@ -132,6 +132,29 @@ and does not create one. Historical `v...` tags and b4 checkpoints remain
 available, but do not trigger new releases. Artifact filenames and changelog
 version headings retain their existing version format.
 
+### patch13 — slot unbootable ignored for boot decisions
+
+OPPO's ABL keeps a per-slot attribute word in the GPT entries of
+`boot_a`/`boot_b` (bits 48..55 of the entry attribute field): priority,
+active, retry count, successful, unbootable. Once bit 23 (`unbootable`) is
+set, stock ABL can refuse to boot that slot and, when both slots are flagged,
+leave no path back into Android.
+
+patch13 makes that bit inert **for the current boot** without modifying the
+GPT write path:
+
+- the shared bootable predicate (successful AND NOT unbootable) is forced to
+  true, covering `IsCurrentSlotBootable`, the `ClearUnbootable` precondition,
+  and the boot-image slot check;
+- the slot-selection read of bit 23 becomes `MOV X24, XZR`;
+- the "how many slots are unbootable" accumulator becomes `MOV W8, WZR`.
+
+The setter (`ORR W9, W9, #0x800000`) and the GPT attribute serializer
+(`LDRH W8, [X9, #6]`) are deliberately left stock. The on-disk flag may
+remain set, but it cannot affect the current boot's decisions; no GPT metadata
+write is changed to silently clear a persistent flag. The patch is optional,
+idempotent, and `Miss`es cleanly if any read-side anchor is absent.
+
 ### patch11c — disabled-vbmeta cmdline
 
 patch11 now has three parts: 11a forces the outbound device state to `locked`,

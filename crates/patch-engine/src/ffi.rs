@@ -211,9 +211,9 @@ mod tests {
             DynamicPatch_Apply(buf.as_mut_ptr(), buf.len() as u32, &mut r);
         }
         // abl_permissive = patch10 + patch6 (mandatory) + patch11 +
-        // patch12 (optional); all MISS on a zero buffer.
+        // patch12 + patch13 (optional); all MISS on a zero buffer.
         assert_eq!(r.applied_count, 0);
-        assert_eq!(r.missed_count, 4);
+        assert_eq!(r.missed_count, 5);
         assert_eq!(r.worst_outcome, CPatchWorst::MandatoryMiss);
     }
 }
