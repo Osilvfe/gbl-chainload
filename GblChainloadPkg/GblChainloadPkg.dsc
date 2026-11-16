@@ -206,15 +206,15 @@
   # coexist with the other staticlibs' identical `loop {}` bodies.
   GCC:*_*_AARCH64_DLINK2_FLAGS = $(WORKSPACE)/target/aarch64-unknown-none/release/libavb_parse.a
   GCC:*_*_*_CC_FLAGS = -DZ_SOLO
-  GCC:*_*_*_CC_FLAGS = -DPRODUCT_NAME=\"$(BOARD_BOOTLOADER_PRODUCT_NAME)\"
-  GCC:*_*_*_CC_FLAGS = -DGBL_CHAINLOAD_VERSION=\"$(GBL_CHAINLOAD_VERSION)\"
+  GCC:*_*_*_CC_FLAGS = -DPRODUCT_NAME='"$(BOARD_BOOTLOADER_PRODUCT_NAME)"'
+  GCC:*_*_*_CC_FLAGS = -DGBL_CHAINLOAD_VERSION='"$(GBL_CHAINLOAD_VERSION)"'
 
   # Build-tuning flags — manifest-driven activation handles per-profile
   # behavior at runtime, so no compile-time mode flag here.
   GCC:*_*_*_CC_FLAGS = -DGBL_AUTO=$(GBL_AUTO)
   GCC:*_*_*_CC_FLAGS = -DGBL_DEBUG=$(GBL_DEBUG)
   GCC:*_*_*_CC_FLAGS = -DGBL_VERBOSE=$(GBL_VERBOSE)
-  GCC:*_*_*_CC_FLAGS = -DGBL_BUILD_NAME=\"$(GBL_BUILD_NAME)\"
+  GCC:*_*_*_CC_FLAGS = -DGBL_BUILD_NAME='"$(GBL_BUILD_NAME)"'
 
   # Workarounds for this Qualcomm edk2 fork against modern Ubuntu GCC:
   #  - __FORTIFY_SOURCE: BaseLib.h:148 macro space-bug workaround

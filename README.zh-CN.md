@@ -313,6 +313,7 @@ bash tests/host/097_patch11_multi_abl.sh
 bash tests/host/098_patch12_patch13_oem.sh
 bash tests/host/099_mode2_runtime.sh
 bash tests/host/100_native_build.sh
+bash tests/host/101_build_defines.sh
 ```
 
 `098` 对所有样本同时验证主机与固件引擎的 mode-0 / mode-1 / mode-2：模式 0/1 没有 patch11，模式 2 才启用；同时检查 OEM 选择、品牌识别、patch12/13 的 6+3 处改写、重复应用及 GPT 写入位置不变。
@@ -320,6 +321,8 @@ bash tests/host/100_native_build.sh
 `099` 使用模拟固件服务执行真实固件 C 启动流程与 QSEE 包装函数：profile 失败时在访问 ABL 前中止，重试清除遗留状态，且只有已确认的 KeyMaster handle 接受 mode-2 改写。这不代替设备测试。
 
 `100` 使用模拟工具链检查本机构建调度、NDK 发现、跨平台产物路径、校验和及缓存保留；本机依赖齐全时，`010_build_smoke.sh` 实际构建固件，`084` 在对应工具链可用时验证真实跨平台二进制。
+
+`101` 验证字符串宏经过 shell 与 EDK2 规范化后的 GCC 响应文件时的引号语义，覆盖干净 CI 构建触发的长命令路径。
 
 全量测试需要额外准备：部分 recovery 测试镜像通过 Git LFS 保存，需使用 `git lfs pull` 获取真实内容；部分 mode-2 parity 测试还依赖 `082_mode2_profile_parity.sh` 生成的 golden 文件及包括 `avbtool` 在内的派生测试前置条件。应先取得真实样本并补齐参考文件再判断全量测试结果，不能把 LFS 指针当作镜像，也不能仅凭前置文件缺失就认定补丁回归。
 
