@@ -56,7 +56,7 @@ mode-0 不是“完全无修改”，mode-1 / mode-2 也不是对任意混合固
 | 补丁 | 范围 | 作用 |
 | --- | --- | --- |
 | patch6 / patch10 | 通用补丁组 | 修改 ABL 的 fastboot 锁态限制及 libavb 校验结果处理路径。 |
-| patch11（含 11a / 11b / 11c） | 通用补丁组 | 向外传递 locked / green 状态，并在 verification-disabled vbmeta 下保留必要的 vbmeta 摘要参数。 |
+| patch11（含 11a / 11b / 11c） | 仅 mode-2，跨品牌 | 向外传递 locked / green 状态，并在 verification-disabled vbmeta 下保留必要的 vbmeta 摘要参数。 |
 | patch7 | Oplus，主机打包时启用 | 跳过 ABL 的解锁警告画面及相应等待。 |
 | patch12 | Oplus | 保留 A/B 重试计数与切槽，定向绕过已分析的拒绝进入 fastboot、重置和死循环分支。 |
 | patch13 | Oplus | 让存储的 unbootable 标记不影响本次 ABL 的相关可启动性判断；不改 GPT 写入路径，也不保证清除磁盘上的标记。 |
@@ -66,6 +66,7 @@ mode-0 不是“完全无修改”，mode-1 / mode-2 也不是对任意混合固
 - 小米 / Redmi 使用 `--oem none` 或省略该参数。`oneplus` 仅作为 `oplus` 的旧名称兼容保留。
 - 设备端从活动槽 ABL 动态回退时，只有同时检测到对应 Oplus 专有字符串，才启用 patch12/13；patch7 仍只在主机端应用。
 - patch12/13 保持可选且支持重复应用。mode-2 打包则会强制检查 patch11 的三个部分，任一未命中都会终止生成。
+- patch11a/11b/11c 只在 mode-2 一起启用。mode-0 / mode-1 完全跳过，mode-1 使用自身的协议拦截而非 patch11。直接运行 `gbl patch` 默认是 mode-0，使用 `gbl patch --mode 2` 才选择 patch11；设备端回退在打补丁前读取 manifest，并以 `WantProfileSpoof` 控制。
 
 ### 通用保护与 mode-1 持久化策略
 
@@ -79,7 +80,7 @@ mode-1 下，VB `WRITE_CONFIG` 是**先修正为 unlocked，再转发**，并非
 
 原厂 libavb 在 verification-disabled 路径可能省略 `androidboot.vbmeta.{hash_alg,size,digest}`，依赖用户空间看到 orange 状态。patch11a/11b 改为报告 locked / green 后，缺少这些参数可能导致第一阶段挂载失败。patch11c 移除该禁用分支，让正常交接路径继续提供这些参数。
 
-`--experimental-vbmeta-cmdline` 已是废弃的空操作，因为 11c 已并入 patch11；mode-2 拼接自动使用 `--require-patch11`。这不能让不匹配的原厂 / 自定义 AVB 链变得有效；11c 还会运行原禁用路径跳过的 managed-verity helper。应验证完整镜像组合，不能把补丁命中视为适配保证。
+`--experimental-vbmeta-cmdline` 已是废弃的空操作，因为 11c 已并入仅 mode-2 启用的 patch11；mode-2 拼接自动使用 `--require-patch11`，mode-0 / mode-1 显式要求此参数会被拒绝。这不能让不匹配的原厂 / 自定义 AVB 链变得有效；11c 还会运行原禁用路径跳过的 managed-verity helper。应验证完整镜像组合，不能把补丁命中视为适配保证。
 
 ## 从源码构建
 
@@ -147,11 +148,13 @@ target/release/gbl inspect dist/efisp-payload/device-mode2-debug.efi
 
 - mode-0 / mode-1：将 `--mode` 改为 `0` / `1`，并移除 `--stock-vbmeta`；Oplus 仍需保留 `--oem oplus` 才会包含专属补丁。
 - mode-2 必须提供 `--stock-vbmeta`，并自动启用 `--require-patch11`。
-- `--mode` 是**拼接脚本**的参数，不是基础固件构建参数。
+- **拼接脚本**会把模式传给 `gbl patch --mode`，它不是基础固件构建参数。
 - 脚本完成解包、补丁、profile 生成和拼接，**不会替你刷写设备**。
 - `inspect` 检查容器结构与完整性，不验证该镜像是否适配硬件；使用前还要确认最终文件没有超过目标 EFISP 分区容量。
 
 更多工具参数见 [主机工具文档](tools/README.md)。
+
+已有 EFISP 可能包含旧策略下对所有模式应用 patch11 的缓存 ABL；本次修改不会自动撤销这些字节。要让 mode-0 / mode-1 使用新行为，需以原厂输入重新构建、拼接。
 
 ## 临时加载与两套 fastboot
 
@@ -304,7 +307,7 @@ bash tests/host/097_patch11_multi_abl.sh
 bash tests/host/098_patch12_patch13_oem.sh
 ```
 
-`098` 同时检查主机 OEM 选择、设备端品牌识别、patch12/13 的 6+3 处改写、重复应用及 GPT 写入位置不变。
+`098` 对所有样本同时验证主机与固件引擎的 mode-0 / mode-1 / mode-2：模式 0/1 没有 patch11，模式 2 才启用；同时检查 OEM 选择、品牌识别、patch12/13 的 6+3 处改写、重复应用及 GPT 写入位置不变。
 
 全量测试需要额外准备：部分 recovery 测试镜像通过 Git LFS 保存，需使用 `git lfs pull` 获取真实内容；部分 mode-2 parity 测试还依赖 `082_mode2_profile_parity.sh` 生成的 golden 文件及包括 `avbtool` 在内的派生测试前置条件。应先取得真实样本并补齐参考文件再判断全量测试结果，不能把 LFS 指针当作镜像，也不能仅凭前置文件缺失就认定补丁回归。
 
@@ -314,7 +317,7 @@ bash tests/host/098_patch12_patch13_oem.sh
 | --- | --- |
 | `GblChainloadPkg/` | EFI 入口、启动流程、协议拦截及载荷处理 |
 | `GblChainloadPkg/Library/ProtocolHookLib/` | 通用 `UniversalBaseline.c`、mode-1 `FakelockOverlay.c`、mode-2 `ProfileOverlay.c` |
-| `crates/patch-engine/` | Rust 补丁引擎；通用补丁在 `abl_permissive/`，Oplus 补丁在 `oem/oplus/` |
+| `crates/patch-engine/` | Rust 补丁引擎；始终启用的跨品牌补丁在 `abl_permissive/`，patch11 在 `mode2/`，Oplus 补丁在 `oem/oplus/` |
 | `tools/gbl/` | 主机 / recovery 多功能工具 |
 | `edk2/` | 固定提交的 CLO edk2 派生子模块 |
 | `scripts/` | 构建、拼接及开发辅助脚本 |

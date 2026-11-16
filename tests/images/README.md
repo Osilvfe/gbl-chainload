@@ -89,8 +89,8 @@ imported from `ablrepo`; those fixtures remain unchanged.
 | `test_patch6` (lock-state fastboot-gate) | `*.efi` (any OnePlus/Oppo libavb PE) | string-anchored gate-bypass; needs extracted PEs |
 | `test_patch10` (libavb force-AVB-success) | `*.efi` (any Qcom libavb PE) | string-anchored function entry/exit rewrite; needs extracted PEs |
 | `088` patch7 cross-build gate | `op*-abl.img`, `xi*-abl.img`, `redmi*-abl.img` | unwraps in-test; patch7 applies to Oplus and misses Xiaomi/Redmi; patch6/10 apply to both |
-| `097` patch11 locked-handoff gate | `*-abl.img` (all tracked ABLs, oplus + Xiaomi) | unwraps in-test; CSEL rewrite + color-table repoint + idempotency |
-| `098` patch12/13 OEM scope | `*-abl.img` (all tracked ABLs) | explicit Oplus packaging + firmware vendor detection; other/unknown OEMs skip; exact 6+3 rewrites, idempotency, GPT write sites unchanged |
+| `097` patch11 locked-handoff gate | `*-abl.img` (all tracked ABLs, oplus + Xiaomi) | explicit mode-2; CSEL rewrite + color-table repoint + idempotency |
+| `098` OEM and mode scope | `*-abl.img` (all tracked ABLs) | host + firmware mode 0/1/2 matrix; patch11 only in mode 2; Oplus-only patch12/13; exact 6+3 rewrites, idempotency, GPT write sites unchanged |
 | `042` mandatory anchor-uniqueness | `*.efi` only | strict |
 | `042` informational anchor-uniqueness | `*.bin`, `*.img` | non-fatal until extractor lands |
 | `060`/`061`/`062`/`064`/`067`/`069`/`081`/`083`/`084` | `pe/infiniti-EU-16.0.5.703.efi` | unwrapped stock infiniti PE |

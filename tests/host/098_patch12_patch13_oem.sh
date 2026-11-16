@@ -25,7 +25,7 @@ for image in "${images[@]}"; do
     >"$OUT/$name.plain.log" 2>&1
   cmp "$OUT/$name.none.efi" "$OUT/$name.plain.efi"
   for logfile in "$OUT/$name.none.log" "$OUT/$name.plain.log"; do
-    if grep -qE 'patch(7|12|13)-' "$logfile"; then
+    if grep -qE 'patch(7|11|12|13)-' "$logfile"; then
       echo "FAIL: $name — OEM patch attempted without --oem oplus"
       cat "$logfile"
       exit 1
@@ -33,6 +33,7 @@ for image in "${images[@]}"; do
   done
 
   if [[ "$name" == op* ]]; then
+    oem=oplus
     target/release/gbl patch --in "$pe" --oem oplus --out "$OUT/$name.selected.efi" \
       >"$OUT/$name.selected.log" 2>&1
     for patch in patch12-boot-failure-fastboot-fallback patch13-slot-unbootable-inert; do
@@ -46,9 +47,45 @@ for image in "${images[@]}"; do
         || { echo "FAIL: $name — $patch not idempotent"; cat "$OUT/$name.reapply.log"; exit 1; }
     done
   else
+    oem=none
     cp "$OUT/$name.none.efi" "$OUT/$name.selected.efi"
   fi
+
+  for mode in 1 2; do
+    extra=()
+    [[ "$mode" == 2 ]] && extra=(--require-patch11)
+    target/release/gbl patch --in "$pe" --mode "$mode" --oem "$oem" \
+      "${extra[@]}" --out "$OUT/$name.mode$mode.efi" >"$OUT/$name.mode$mode.log" 2>&1
+    if [[ "$mode" == 2 ]]; then
+      grep -qF 'patch11-locked-handoff-bootconfig [mode-2, optional] -> OK' "$OUT/$name.mode$mode.log"
+    else
+      cmp "$OUT/$name.selected.efi" "$OUT/$name.mode$mode.efi"
+      if grep -qF 'patch11-' "$OUT/$name.mode$mode.log"; then
+        echo "FAIL: $name — mode 1 attempted patch11"
+        exit 1
+      fi
+    fi
+  done
 done
+
+for mode in 0 1; do
+  if target/release/gbl patch --in "${pes[0]}" --mode "$mode" --require-patch11 \
+    >"$OUT/reject-mode$mode.log" 2>&1; then
+    echo "FAIL: mode $mode accepted --require-patch11"
+    exit 1
+  fi
+  grep -qF -- '--require-patch11 requires --mode 2' "$OUT/reject-mode$mode.log"
+done
+
+python3 - <<'PY'
+from pathlib import Path
+
+source = Path('GblChainloadPkg/Application/GblChainload/BootFlow.c').read_text()
+flow = source.split('BootFlowChainLoad (VOID)', 1)[1]
+assert flow.index('GblPayload_LoadManifest (') < flow.index('RunDynamicPatchOnSlotAbl ('), 'manifest must precede dynamic patching'
+assert 'DynamicPatchLib_EnsureInitWithMode2 (gManifest.WantProfileSpoof)' in source
+print('PASS: firmware reads the manifest before selecting patch11')
+PY
 
 "$OUT/check" "${pes[@]}" >"$OUT/matrix.log" 2>"$OUT/engine.log"
 cat "$OUT/matrix.log"

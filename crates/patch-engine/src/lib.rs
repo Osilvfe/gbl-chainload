@@ -3,7 +3,8 @@
 //!
 //! Mirrors PR1's directory shape:
 //!
-//! - [`abl_permissive`] — cross-OEM patch10 + patch6 + patch11.
+//! - [`abl_permissive`] — always-on cross-OEM patch10 + patch6.
+//! - [`mode2`] — patch11, enabled only for profile spoofing.
 //! - [`oem`] — Oplus patch12/13, plus host-only patch7.
 //! - [`retired`] — host-only documentation / reference. patch1 (efisp
 //!   recursion) — never wired into an active table.
@@ -37,6 +38,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 pub mod internal;
 pub mod abl_permissive;
+pub mod mode2;
 pub mod oem;
 #[cfg(feature = "host")]
 pub mod retired;
@@ -62,14 +64,15 @@ pub enum Oem {
 
 /// Patch scope — which group a [`PatchDesc`] belongs to.
 ///
-/// Discriminants match `enum PATCH_SCOPE` from the deleted
-/// `Include/Library/PatchDesc.h`.
+/// Existing discriminants match the deleted `PATCH_SCOPE`; the mode-2
+/// scope is appended without renumbering the original values.
 #[repr(C)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PatchScope {
     Universal = 0,
     OemOplus = 1,
     AblPermissive = 2,
+    Mode2 = 3,
 }
 
 /// Per-patch outcome.
@@ -128,6 +131,7 @@ pub struct PatchResult {
 pub struct Engine {
     table: EngineTable,
     detect_oplus: bool,
+    mode2: bool,
 }
 
 #[derive(Clone)]
@@ -165,6 +169,7 @@ impl Engine {
         Engine {
             table: EngineTable::Static(abl_permissive::ABL_PERMISSIVE_PATCHES),
             detect_oplus: true,
+            mode2: false,
         }
     }
 
@@ -189,7 +194,14 @@ impl Engine {
         Engine {
             table: EngineTable::Owned(v),
             detect_oplus: false,
+            mode2: false,
         }
+    }
+
+    /// Enable all three parts of patch11 only for mode-2/profile spoofing.
+    pub fn with_mode2(mut self, enabled: bool) -> Self {
+        self.mode2 = enabled;
+        self
     }
 
     /// Apply every patch in the table to `pe` in-place.
@@ -207,7 +219,18 @@ impl Engine {
         } else {
             &[]
         };
-        for p in self.table.as_slice().iter().chain(oplus_patches) {
+        let mode2_patches = if self.mode2 {
+            mode2::MODE2_PATCHES
+        } else {
+            &[]
+        };
+        for p in self
+            .table
+            .as_slice()
+            .iter()
+            .chain(mode2_patches)
+            .chain(oplus_patches)
+        {
             let outcome = (p.apply)(pe, size);
             self.emit_log(p, outcome);
             match outcome {
@@ -233,7 +256,7 @@ impl Engine {
         }
     }
 
-    /// Borrow the configured patch table, before firmware ABL detection.
+    /// Borrow the base table, before mode-2 selection and firmware ABL detection.
     #[doc(hidden)]
     pub fn table(&self) -> &[PatchDesc] {
         self.table.as_slice()
@@ -247,6 +270,7 @@ impl Engine {
         Engine {
             table: EngineTable::Static(table),
             detect_oplus: false,
+            mode2: false,
         }
     }
 
@@ -261,6 +285,7 @@ impl Engine {
             PatchScope::Universal => "universal",
             PatchScope::OemOplus => "oem-oplus",
             PatchScope::AblPermissive => "abl-permissive",
+            PatchScope::Mode2 => "mode-2",
         };
         let mandatory_str = if p.mandatory { "mandatory" } else { "optional" };
         eprintln!(
@@ -287,6 +312,7 @@ mod tests {
         assert_eq!(PatchScope::Universal as u32, 0);
         assert_eq!(PatchScope::OemOplus as u32, 1);
         assert_eq!(PatchScope::AblPermissive as u32, 2);
+        assert_eq!(PatchScope::Mode2 as u32, 3);
         // Mirror of `enum PATCH_OUTCOME`.
         assert_eq!(PatchOutcome::Ok as u32, 0);
         assert_eq!(PatchOutcome::Miss as u32, 1);
@@ -413,11 +439,24 @@ mod tests {
         assert_eq!(r.worst, Worst::Ok);
     }
 
+    #[test]
+    fn mode2_must_be_explicitly_enabled_and_can_be_disabled() {
+        let mut buffer = [0u8; 4096];
+        let engine = Engine::from_static(&[]);
+        assert_eq!(engine.apply(&mut buffer).missed_count, 0);
+        let enabled = engine.with_mode2(true);
+        let result = enabled.apply(&mut buffer);
+        assert_eq!(result.applied_count, 0);
+        assert_eq!(result.missed_count, 1);
+        assert_eq!(result.worst, Worst::OptionalMiss);
+        assert_eq!(enabled.with_mode2(false).apply(&mut buffer).missed_count, 0);
+    }
+
     #[cfg(feature = "host")]
     #[test]
     fn ensure_init_scoped_skips_oem() {
         let eng = Engine::ensure_init_scoped(Oem::None, true);
-        assert_eq!(eng.table().len(), 3);
+        assert_eq!(eng.table().len(), 2);
         for p in eng.table() {
             assert_eq!(p.scope, PatchScope::AblPermissive);
         }
@@ -427,7 +466,7 @@ mod tests {
     #[test]
     fn ensure_init_scoped_includes_oem() {
         let eng = Engine::ensure_init_scoped(Oem::Oplus, true);
-        assert_eq!(eng.table().len(), 6);
+        assert_eq!(eng.table().len(), 5);
         assert_eq!(eng.table()[0].scope, PatchScope::OemOplus);
     }
 
@@ -445,7 +484,7 @@ mod tests {
     fn firmware_engine_detects_oplus_separately_from_common_table() {
         let eng = Engine::ensure_init();
         assert!(eng.detect_oplus);
-        assert_eq!(eng.table().len(), 3);
+        assert_eq!(eng.table().len(), 2);
         for p in eng.table() {
             assert_eq!(p.scope, PatchScope::AblPermissive);
         }

@@ -1,4 +1,4 @@
-//! patch11 — bootconfig locked-handoff ("lifecycle split" spoof).
+//! Mode-2 patch11 — bootconfig locked-handoff ("lifecycle split" spoof).
 //!
 //! Goal (方案1 from the 2026-10-08 session): ABL keeps its real
 //! unlocked internal state during image load / AVB verification (so

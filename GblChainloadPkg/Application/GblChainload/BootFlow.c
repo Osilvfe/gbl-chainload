@@ -82,7 +82,7 @@ RunDynamicPatchOnSlotAbl (
   GBL_INFO ("BootFlow: ABL loaded from flash — %u bytes\n", *PeSize);
 
   /* 2b. Initialize patch table aggregator + apply patches. */
-  DynamicPatchLib_EnsureInit ();
+  DynamicPatchLib_EnsureInitWithMode2 (gManifest.WantProfileSpoof);
   DynamicPatch_Apply (*Pe, *PeSize, &PatchRes);
 
   GBL_INFO ("BootFlow: patches applied=%u missed=%u worst=%d\n",
@@ -128,6 +128,19 @@ BootFlowChainLoad (VOID)
 
   GblPayload_LogProvenance (gImageHandle);
 
+  {
+    EFI_STATUS MStatus = GblPayload_LoadManifest (gImageHandle, &gManifest);
+    if (EFI_ERROR (MStatus)) {
+      GBL_INFO ("BootFlow: manifest load failed (%r) — defaulting all caps to 0\n",
+                MStatus);
+      gManifest.WantFakelockHook = FALSE;
+      gManifest.WantProfileSpoof = FALSE;
+    }
+    GBL_INFO ("BootFlow: manifest — fakelock=%u spoof=%u\n",
+              (UINT32)gManifest.WantFakelockHook,
+              (UINT32)gManifest.WantProfileSpoof);
+  }
+
   /* Tier 1: cached ABL via GBLP1 overlay on EFISP. */
   Status = GblPayload_LoadCachedAbl (gImageHandle, &Pe, &PeSize);
   if (!EFI_ERROR (Status)) {
@@ -149,24 +162,6 @@ BootFlowChainLoad (VOID)
   }
 
   GBL_INFO ("BootFlow: ABL loaded via %a (size=%u)\n", Origin, PeSize);
-
-  /* Load the engine capability manifest before any hook install. Absence
-     is non-fatal: gManifest defaults to all-FALSE (effective mode-0 /
-     pure observation), and downstream gates fall through cleanly. */
-  {
-    EFI_STATUS MStatus = GblPayload_LoadManifest (gImageHandle, &gManifest);
-    if (EFI_ERROR (MStatus)) {
-      GBL_INFO ("BootFlow: manifest load failed (%r) — defaulting all caps to 0\n",
-                MStatus);
-      /* Defensive: GblPayload_LoadManifest already zeroes on error, but
-         re-assert so a future API change can't silently leave stale data. */
-      gManifest.WantFakelockHook = FALSE;
-      gManifest.WantProfileSpoof = FALSE;
-    }
-    GBL_INFO ("BootFlow: manifest — fakelock=%u spoof=%u\n",
-              (UINT32)gManifest.WantFakelockHook,
-              (UINT32)gManifest.WantProfileSpoof);
-  }
 
   if (gManifest.WantProfileSpoof) {
     struct gbl_mode2_profile Mode2Profile;

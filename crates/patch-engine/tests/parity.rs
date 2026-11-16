@@ -19,7 +19,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use patch_engine::{
-    abl_permissive::{fastboot_lock_gates, libavb_force_success, vbmeta_disabled_cmdline},
+    abl_permissive::{fastboot_lock_gates, libavb_force_success},
+    mode2::vbmeta_disabled_cmdline,
     internal::{
         arm64_decode::find_adrp_add_targeting,
         encode::read_instr_u32,
@@ -288,11 +289,15 @@ const PATCH11_GREEN_PTR: u64 = 0x66275;
 
 #[test]
 fn patch11_table_membership() {
-    let abl_table = patch_engine::abl_permissive::ABL_PERMISSIVE_PATCHES;
-    let p = abl_table
+    let mode2_table = patch_engine::mode2::MODE2_PATCHES;
+    let p = mode2_table
         .iter()
         .find(|p| p.name == "patch11-locked-handoff-bootconfig")
-        .expect("patch11 missing from abl_permissive table");
+        .expect("patch11 missing from mode2 table");
+    assert_eq!(p.scope, PatchScope::Mode2);
+    assert!(!patch_engine::abl_permissive::ABL_PERMISSIVE_PATCHES
+        .iter()
+        .any(|patch| patch.name == p.name));
     assert!(!p.mandatory, "patch11 must be optional (never blocks chainload)");
 }
 
@@ -315,7 +320,7 @@ fn patch11_apply_rewrites_csel_and_color_table() {
         "CSEL word drift — fixture or build layout changed"
     );
 
-    use patch_engine::abl_permissive::locked_handoff;
+    use patch_engine::mode2::locked_handoff;
     assert_eq!(locked_handoff::apply(&mut work, size), PatchOutcome::Ok);
 
     // 11a: CSEL → MOV x2, x10 ("locked" operand).
@@ -354,7 +359,7 @@ fn patch11_apply_rewrites_csel_and_color_table() {
 fn patch11_clean_miss_without_anchor() {
     let mut work = vec![0u8; 4096];
     let size = work.len() as u32;
-    use patch_engine::abl_permissive::locked_handoff;
+    use patch_engine::mode2::locked_handoff;
     assert_eq!(locked_handoff::apply(&mut work, size), PatchOutcome::Miss);
 }
 
@@ -363,7 +368,7 @@ fn patch11_clean_miss_without_anchor() {
 #[test]
 fn patch11c_is_bundled_and_not_a_separate_table_entry() {
     assert!(
-        !patch_engine::abl_permissive::ABL_PERMISSIVE_PATCHES
+        !patch_engine::mode2::MODE2_PATCHES
             .iter()
             .any(|p| p.name.contains("patch14")),
         "patch11c must not be a separate patch14 table entry"
@@ -628,16 +633,16 @@ fn patch13_clean_miss_without_sites() {
 // --- Engine-level integration tests -----------------------------------
 
 #[test]
-fn engine_scoped_oplus_applies_all_three() {
+fn engine_mode2_oplus_applies_all_patches() {
     let buf = match infiniti_pe() {
         Some(b) => b,
         None => {
-            eprintln!("SKIP: engine_scoped_oplus_applies_all_three — fixture missing");
+            eprintln!("SKIP: engine_mode2_oplus_applies_all_patches — fixture missing");
             return;
         }
     };
     let mut work = buf.clone();
-    let engine = Engine::ensure_init_scoped(Oem::Oplus, true);
+    let engine = Engine::ensure_init_scoped(Oem::Oplus, true).with_mode2(true);
     let r = engine.apply(&mut work);
     // patch7 + patch10 + patch6 + patch11 + patch12 + patch13 = 6 applied.
     assert_eq!(
@@ -660,9 +665,16 @@ fn engine_scoped_none_only_runs_abl_permissive() {
     let mut work = buf.clone();
     let engine = Engine::ensure_init_scoped(Oem::None, true);
     let r = engine.apply(&mut work);
-    assert_eq!(r.applied_count, 3);
+    assert_eq!(r.applied_count, 2);
     assert_eq!(r.missed_count, 0);
     assert_eq!(r.worst, Worst::Ok);
+
+    assert_eq!(read_instr_u32(&work, PATCH11_CSEL_OFF), PATCH11_CSEL_ORIG);
+    assert_eq!(read_instr_u32(&work, PATCH14_BRANCH_OFF), PATCH14_TBNZ_W8_1);
+    assert_eq!(
+        &work[PATCH11_TABLE_OFF..PATCH11_TABLE_OFF + 64],
+        &buf[PATCH11_TABLE_OFF..PATCH11_TABLE_OFF + 64],
+    );
 
     for offset in oplus_boot_offsets(&buf) {
         assert_eq!(&work[offset..offset + 4], &buf[offset..offset + 4]);
@@ -684,7 +696,7 @@ fn engine_scoped_none_only_runs_abl_permissive() {
 #[test]
 fn engine_firmware_base_table_only_abl_permissive() {
     let engine = Engine::ensure_init();
-    assert_eq!(engine.table().len(), 3);
+    assert_eq!(engine.table().len(), 2);
     for p in engine.table() {
         assert_eq!(p.scope, PatchScope::AblPermissive);
     }
@@ -718,7 +730,7 @@ fn engine_firmware_detects_oplus_and_preserves_host_only_warning() {
     assert!(patch_engine::oem::oplus::matches_abl(&original));
     let mut firmware = original.clone();
     let result = Engine::ensure_init().apply(&mut firmware);
-    assert_eq!(result.applied_count, 5);
+    assert_eq!(result.applied_count, 4);
     assert_eq!(result.missed_count, 0);
     assert_eq!(result.worst, Worst::Ok);
 
@@ -751,7 +763,7 @@ fn engine_firmware_skips_oplus_even_when_slot_patterns_match() {
     assert!(!patch_engine::oem::oplus::matches_abl(&unknown));
     let mut firmware = unknown.clone();
     let result = Engine::ensure_init().apply(&mut firmware);
-    assert_eq!(result.applied_count, 3);
+    assert_eq!(result.applied_count, 2);
     assert_eq!(result.missed_count, 0);
     assert_eq!(result.worst, Worst::Ok);
     for offset in offsets {

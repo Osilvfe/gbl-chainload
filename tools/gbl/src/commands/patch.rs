@@ -9,13 +9,14 @@
 //! - `--check-anchors-only` re-uses the engine's apply loop and only
 //!   surfaces a mandatory miss (matching the C source comment about
 //!   AMBIGUOUS/MISS being lumped together).
-//! - `--require-patch11` upgrades a patch11 miss to a mandatory failure;
+//! - `--mode 2` selects patch11; modes 0/1 do not attempt it.
+//! - `--require-patch11` upgrades a mode-2 patch11 miss to a mandatory failure;
 //!   mode-2 packaging uses it because 11c is required for custom ROMs.
 
 use std::path::PathBuf;
 
 use clap::Parser;
-use patch_engine::{abl_permissive::locked_handoff, Engine, Oem, PatchOutcome, Worst};
+use patch_engine::{mode2::locked_handoff, Engine, Oem, PatchOutcome, Worst};
 
 use super::{slurp, GblError};
 
@@ -35,17 +36,28 @@ pub struct Args {
     /// is a deprecation alias; `none` (default) skips all three.
     #[arg(long, value_name = "ID")]
     oem: Option<String>,
+    /// Install mode. Only mode 2 enables patch11a/11b/11c.
+    #[arg(
+        long,
+        default_value_t = 0,
+        value_parser = clap::value_parser!(u8).range(0..=2)
+    )]
+    mode: u8,
     /// Deprecated no-op: the disabled-vbmeta cmdline edit is now part of
-    /// patch11 (subpatch 11c) and is always applied.
+    /// patch11 (subpatch 11c) and only applied in mode 2.
     #[arg(long, hide = true)]
     experimental_vbmeta_cmdline: bool,
     /// Fail the build unless all three patch11 halves (11a/11b/11c) apply.
-    /// Custom-ROM (mode 2) packaging enables this automatically.
+    /// Requires --mode 2. Mode-2 packaging enables this automatically.
     #[arg(long)]
     require_patch11: bool,
 }
 
 pub fn run(args: Args) -> Result<(), GblError> {
+    if args.require_patch11 && args.mode != 2 {
+        return Err(GblError::usage("--require-patch11 requires --mode 2"));
+    }
+
     // OEM resolution — mirror abl-patcher.c's `if (OemStr != NULL)` block.
     let oem = match args.oem.as_deref() {
         None => Oem::None,
@@ -66,7 +78,7 @@ pub fn run(args: Args) -> Result<(), GblError> {
     };
 
     // abl_permissive is always on at host packing time.
-    let engine = Engine::ensure_init_scoped(oem, true);
+    let engine = Engine::ensure_init_scoped(oem, true).with_mode2(args.mode == 2);
 
     let mut buf = slurp(&args.r#in)?;
     let sz = buf.len();
@@ -75,7 +87,7 @@ pub fn run(args: Args) -> Result<(), GblError> {
     if args.experimental_vbmeta_cmdline {
         eprintln!(
             "abl-patcher: --experimental-vbmeta-cmdline is deprecated and \
-             no longer needed; patch11c is included in patch11"
+             no longer needed; patch11c is included in patch11 for --mode 2 only"
         );
     }
 
@@ -88,7 +100,7 @@ pub fn run(args: Args) -> Result<(), GblError> {
         };
         eprintln!(
             "DynamicPatch: patch11-required-custom-rom \
-             [abl-permissive, mandatory] -> {outcome_name}"
+             [mode-2, mandatory] -> {outcome_name}"
         );
         if outcome != PatchOutcome::Ok {
             result.worst = Worst::MandatoryMiss;

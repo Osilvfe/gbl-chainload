@@ -70,7 +70,7 @@ gbl unwrap stock_abl.img extracted.efi
 ### `gbl patch`
 
 ```
-gbl patch --in <PE> [--out <OUT>] [--check-anchors-only] [--oem <id>]
+gbl patch --in <PE> [--out <OUT>] [--check-anchors-only] [--oem <id>] [--mode 0|1|2]
           [--require-patch11]
 ```
 
@@ -87,15 +87,19 @@ Flags:
   warning; will be removed in a future release). `oplus` enables
   patch7/12/13. All three are skipped with `none` or no `--oem`; they
   are not attempted and do not count as optional misses.
-- `--require-patch11` — fail unless patch11a/11b/11c all apply. The disabled-
+- `--mode <0|1|2>` — defaults to `0`. Only mode `2` selects patch11a/11b/11c;
+  modes `0` and `1` skip the entire patch, independently of OEM selection.
+- `--require-patch11` — requires `--mode 2`; fail unless patch11a/11b/11c all apply. The disabled-
   vbmeta cmdline edit is now 11c and part of patch11. `efisp-package.py`
   enables this automatically for mode 2.
 - `--experimental-vbmeta-cmdline` — deprecated no-op retained for script
   compatibility.
-- `abl_permissive` patches are always applied at host packing time — the
-  on-device manifest decides at runtime whether they take effect.
+- `abl_permissive` patch6/10 are always applied during host packaging and
+  firmware fallback. The manifest selects protocol-hook overlays; it does
+  not undo already-patched cached ABL bytes.
 
-The cross-OEM group contains patch6/10/11. Patch12/13 remain optional
+The always-on cross-OEM group contains patch6/10. Patch11 is in the separate
+mode-2 group. Patch12/13 remain optional
 Oplus-only patches; their instruction rewrites and GPT write behavior are
 unchanged. Firmware fallback from a live ABL enables patch12/13 only when
 both Oplus vendor strings (`if olock secure lock state, Not allow Fastboot.`
@@ -104,13 +108,14 @@ images skip them entirely. This content check does not enable patch7,
 which remains host-only. It does not change already-generated EFISP files.
 
 Note (post-PR1): `gbl patch` has NO `--no-mode1` flag. Engine-rework
-PR1 collapsed the mode-1 patch group into the always-on `abl_permissive`
-set; the on-device manifest gates execution.
+PR1 collapsed the old mode-1 patch group into `abl_permissive`; the always-on
+set now contains patch6/10. Patch11 has a separate mode-2 gate, while the
+on-device manifest selects the protocol-hook overlays.
 
 ```
 gbl patch --check-anchors-only --in extracted.efi
 gbl patch --oem oplus --in extracted.efi --out patched.efi
-gbl patch --oem oplus --require-patch11 \
+gbl patch --oem oplus --mode 2 --require-patch11 \
           --in extracted.efi --out patched-experimental.efi
 ```
 
@@ -262,8 +267,8 @@ gbl commit \
 ## Engine-rework deltas (PR1 contract)
 
 - `gbl patch` has no `--no-mode1` flag (PR1 Task 12 dropped the mode-1
-  patch group as a separate gate; `abl_permissive` is always applied;
-  the on-device manifest decides at runtime).
+  patch group as a separate gate; patch6/10 remain always-on, patch11 is
+  mode-2-only, and the manifest selects runtime protocol-hook overlays).
 - `gbl pack --manifest <bits>` emits a PR1 Task 3 capability-bits
   manifest entry (type `0x0020`); `BITS` accepts hex or decimal.
 - `gbl inspect` pretty-prints the manifest entry's bit fields (PR1
@@ -284,7 +289,7 @@ does not write device storage.
 python3 scripts/efisp-package.py \
   --abl  stock_abl.img \
   --mode 0|1|2 \
-  --efi  mode-N.efi \
+  --efi  gbl-chainload.efi \
   [--stock-vbmeta stock_vbmeta.img] \
   [--oem oplus] \
   [--out installed.efi]
@@ -292,14 +297,20 @@ python3 scripts/efisp-package.py \
 
 Mode-specific inputs:
 
+The packager forwards `--mode` to `gbl patch`. Requesting
+`--require-patch11` with mode 0/1 is rejected rather than enabling the patch.
+Firmware fallback loads the manifest before patching and selects patch11
+only for `WantProfileSpoof`. Existing cached ABLs are not unpatched; regenerate
+old mode-0/1 EFISP images from stock inputs to remove their earlier patch11.
+
 For OnePlus/Oppo/Realme packaging, pass `--oem oplus` to include patch12/13
 as well as patch7. For Xiaomi/Redmi, omit `--oem` or use `--oem none`.
 
-| Mode | Base EFI     | Required extra files                                                    | What gets packed                                          |
-|------|--------------|-------------------------------------------------------------------------|-----------------------------------------------------------|
-| 0    | `mode-0.efi` | none                                                                    | cached ABL with `abl_permissive` only                     |
-| 1    | `mode-1.efi` | none                                                                    | cached ABL with `abl_permissive` + manifest mode-1 bit    |
-| 2    | `mode-2.efi` | stock main `vbmeta.img` (`--stock-vbmeta`) and OEM id (`--oem`)         | cached ABL with OEM group + compiled mode-2 profile       |
+| Mode | Base EFI | Required extra files | What gets packed |
+| --- | --- | --- | --- |
+| 0 | shared `gbl-chainload.efi` | none | patch6/10 + selected OEM patches; manifest `0x00` |
+| 1 | shared `gbl-chainload.efi` | none | patch6/10 + selected OEM patches; manifest `0x01` |
+| 2 | shared `gbl-chainload.efi` | `--stock-vbmeta` | patch6/10 + required patch11 + selected OEM patches + profile; manifest `0x02` |
 
 For mode 2, `--stock-vbmeta` is the device's main vbmeta image used to
 derive the 120-byte mode-2 profile. It is separate from any partition

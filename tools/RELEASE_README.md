@@ -50,26 +50,30 @@ at the top level.
 # Mode 0 (universal patches only)
 python3 efisp-package.py \
   --abl      stock_abl.img \
-  --manifest 0x00 \
+  --mode     0 \
   --efi      gbl-chainload-vX.Y.Z.efi \
   --out      installed-mode0.efi
 
 # Mode 1 (fakelock — adds WantFakelockHook = 0x0001)
 python3 efisp-package.py \
   --abl      stock_abl.img \
-  --manifest 0x01 \
+  --mode     1 \
   --efi      gbl-chainload-vX.Y.Z.efi \
   --out      installed-mode1.efi
 
 # Mode 2 (profile spoof — adds WantProfileSpoof = 0x0002)
 python3 efisp-package.py \
   --abl          stock_abl.img \
-  --manifest     0x02 \
+  --mode         2 \
   --efi          gbl-chainload-vX.Y.Z.efi \
   --stock-vbmeta stock_vbmeta.img \
   --oem          oplus \
   --out          installed-mode2.efi
 ```
+
+The packager forwards the mode to `gbl patch`: patch11a/11b/11c are enabled
+only for mode 2 and are required there. Modes 0/1 skip patch11; use
+`--oem oplus` independently to include patch7/12/13 on Oplus devices.
 
 Before booting, inspect the appended GBLP1 payload:
 

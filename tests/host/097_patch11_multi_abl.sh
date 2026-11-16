@@ -54,7 +54,7 @@ for img in "${ALL_ABLS[@]}"; do
 
   # 1. First application: patch11 must -> OK on every ABL (oplus and
   #    non-oplus alike — the anchors are AOSP-shared).
-  "${PATCHER[@]}" --in "$pe" --out "$p1" --oem oplus \
+  "${PATCHER[@]}" --in "$pe" --out "$p1" --oem oplus --mode 2 \
       >"$OUT/$name.p1.log" 2>&1 \
       || { echo "FAIL: $name abl-patcher (pass 1)"; cat "$OUT/$name.p1.log"; exit 1; }
   if ! grep -qE 'patch11-locked-handoff-bootconfig .* -> OK' "$OUT/$name.p1.log"; then
@@ -64,7 +64,7 @@ for img in "${ALL_ABLS[@]}"; do
   # 2. Idempotency: re-run against the already-patched PE. patch10 +
   #    patch6 mandatory-miss (expected); the invariant under test is
   #    patch11 reporting OK again with no double-mutation.
-  "${PATCHER[@]}" --in "$p1" --oem oplus \
+  "${PATCHER[@]}" --in "$p1" --oem oplus --mode 2 \
       >"$OUT/$name.p2.log" 2>&1 \
       || true
   if ! grep -qE 'patch11-locked-handoff-bootconfig .* -> OK' "$OUT/$name.p2.log"; then

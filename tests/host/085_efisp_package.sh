@@ -80,6 +80,9 @@ python3 scripts/efisp-package.py \
   || { echo "FAIL: mode-1 output has no locatable cached-ABL overlay"; exit 1; }
 assert_no_argv "$OUT/patch.argv" "--no-mode1" "mode 1 patch"
 assert_no_argv "$OUT/patch.argv" "--oem"      "mode 1 patch (no --oem)"
+assert_argv    "$OUT/patch.argv" "--mode"     "mode 1 patch mode flag"
+assert_argv    "$OUT/patch.argv" "1"          "mode 1 patch mode value"
+assert_no_argv "$OUT/patch.argv" "--require-patch11" "mode 1 skips patch11"
 assert_argv    "$OUT/pack.argv"  "--manifest" "mode 1 pack manifest flag"
 assert_argv    "$OUT/pack.argv"  "0x01"       "mode 1 pack manifest bits"
 
@@ -93,6 +96,9 @@ python3 scripts/efisp-package.py \
   || { echo "FAIL: mode-0 output has no locatable cached-ABL overlay"; exit 1; }
 assert_no_argv "$OUT/patch.argv" "--no-mode1" "mode 0 patch"
 assert_no_argv "$OUT/patch.argv" "--oem"      "mode 0 patch (no --oem)"
+assert_argv    "$OUT/patch.argv" "--mode"     "mode 0 patch mode flag"
+assert_argv    "$OUT/patch.argv" "0"          "mode 0 patch mode value"
+assert_no_argv "$OUT/patch.argv" "--require-patch11" "mode 0 skips patch11"
 assert_argv    "$OUT/pack.argv"  "--manifest" "mode 0 pack manifest flag"
 assert_argv    "$OUT/pack.argv"  "0x00"       "mode 0 pack manifest bits"
 
@@ -128,8 +134,21 @@ if [ -f "$VBMETA" ]; then
   "$H" scan-cached-abl "$OUT/mode2.efi" | grep -q 'status=0' \
     || { echo "FAIL: mode-2 output has no locatable cached-ABL overlay"; exit 1; }
   assert_argv "$OUT/patch.argv" "--require-patch11" "mode 2 strict patch11"
+  assert_argv "$OUT/patch.argv" "--mode" "mode 2 patch mode flag"
+  assert_argv "$OUT/patch.argv" "2" "mode 2 patch mode value"
   assert_argv "$OUT/pack.argv" "0x02" "mode 2 pack manifest bits"
 fi
+
+for mode in 0 1; do
+  if python3 scripts/efisp-package.py --abl "$ABL" --mode "$mode" \
+    --efi "$OUT/base.efi" --require-patch11 --tools-dir "$OUT/tools" \
+    --out "$OUT/rejected-mode$mode.efi" >"$OUT/rejected-mode$mode.log" 2>&1; then
+    echo "FAIL: mode $mode accepted --require-patch11"
+    exit 1
+  fi
+  grep -qF -- '--require-patch11 is only valid for --mode 2' "$OUT/rejected-mode$mode.log"
+  [ ! -f "$OUT/rejected-mode$mode.efi" ] || { echo "FAIL: rejected mode $mode left an EFI"; exit 1; }
+done
 
 # pre-flight gate: --stock-vbmeta on mode 1 must abort non-zero.
 python3 scripts/efisp-package.py \

@@ -6,6 +6,7 @@ use patch_engine::{
         encode::read_instr_u32,
         scan::{scan_for, ScanResult},
     },
+    mode2::locked_handoff,
     oem::oplus::{self, boot_failure_fallback, slot_unbootable_clear},
     Engine, Oem, PatchApply, PatchOutcome, Worst,
 };
@@ -60,7 +61,7 @@ fn main() {
 
         let mut common = original.clone();
         let common_result = Engine::ensure_init_scoped(Oem::None, true).apply(&mut common);
-        assert_eq!(common_result.applied_count, 3);
+        assert_eq!(common_result.applied_count, 2);
         assert_eq!(common_result.missed_count, 0);
         assert_eq!(common_result.worst, Worst::Ok);
         assert_eq!(common, fs::read(path.with_extension("none.efi")).unwrap());
@@ -83,7 +84,7 @@ fn main() {
         let mut firmware = original.clone();
         let firmware_result = Engine::ensure_init().apply(&mut firmware);
         assert_eq!(firmware, expected_firmware);
-        assert_eq!(firmware_result.applied_count, if is_oplus { 5 } else { 3 });
+        assert_eq!(firmware_result.applied_count, if is_oplus { 4 } else { 2 });
         assert_eq!(firmware_result.missed_count, 0);
         assert_eq!(firmware_result.worst, Worst::Ok);
 
@@ -91,10 +92,69 @@ fn main() {
         let host_result =
             Engine::ensure_init_scoped(if is_oplus { Oem::Oplus } else { Oem::None }, true)
                 .apply(&mut host);
-        assert_eq!(host_result.applied_count, if is_oplus { 6 } else { 3 });
+        assert_eq!(host_result.applied_count, if is_oplus { 5 } else { 2 });
         assert_eq!(host_result.missed_count, 0);
         assert_eq!(host_result.worst, Worst::Ok);
         assert_eq!(host, fs::read(path.with_extension("selected.efi")).unwrap());
+
+        let mut patch11 = original.clone();
+        assert_eq!(
+            locked_handoff::apply(&mut patch11, original.len() as u32),
+            PatchOutcome::Ok
+        );
+        let offsets11 = changed_words(&original, &patch11);
+        assert!(!offsets11.is_empty());
+        for offset in offsets11 {
+            assert_eq!(&host[offset..offset + 4], &original[offset..offset + 4]);
+            assert_eq!(&firmware[offset..offset + 4], &original[offset..offset + 4]);
+        }
+        let snapshot = patch11.clone();
+        assert_eq!(
+            locked_handoff::apply(&mut patch11, original.len() as u32),
+            PatchOutcome::Ok
+        );
+        assert_eq!(patch11, snapshot);
+
+        for mode in [1, 2] {
+            let mut expected_host = host.clone();
+            let mut expected_firmware = firmware.clone();
+            if mode == 2 {
+                assert_eq!(
+                    locked_handoff::apply(&mut expected_host, original.len() as u32),
+                    PatchOutcome::Ok
+                );
+                assert_eq!(
+                    locked_handoff::apply(&mut expected_firmware, original.len() as u32),
+                    PatchOutcome::Ok
+                );
+            }
+            let mut selected_host = original.clone();
+            let result =
+                Engine::ensure_init_scoped(if is_oplus { Oem::Oplus } else { Oem::None }, true)
+                    .with_mode2(mode == 2)
+                    .apply(&mut selected_host);
+            assert_eq!(
+                result.applied_count,
+                host_result.applied_count + u32::from(mode == 2)
+            );
+            assert_eq!(result.missed_count, 0);
+            assert_eq!(selected_host, expected_host);
+            assert_eq!(
+                selected_host,
+                fs::read(path.with_extension(format!("mode{mode}.efi"))).unwrap()
+            );
+
+            let mut selected_firmware = original.clone();
+            let result = Engine::ensure_init()
+                .with_mode2(mode == 2)
+                .apply(&mut selected_firmware);
+            assert_eq!(
+                result.applied_count,
+                firmware_result.applied_count + u32::from(mode == 2)
+            );
+            assert_eq!(result.missed_count, 0);
+            assert_eq!(selected_firmware, expected_firmware);
+        }
 
         if is_oplus {
             assert_eq!(offsets12.len(), 6);
@@ -175,5 +235,5 @@ fn main() {
         }
     }
     assert!(oplus_count + other_count > 0);
-    println!("PASS: OEM matrix: {oplus_count} Oplus, {other_count} non-Oplus");
+    println!("PASS: OEM + mode matrix: {oplus_count} Oplus, {other_count} non-Oplus, each in modes 0/1/2");
 }

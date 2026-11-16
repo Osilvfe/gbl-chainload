@@ -76,12 +76,16 @@ typedef int GBL_OEM;
 
 /* ---- Engine entry points ---------------------------------------------- */
 
-/* Firmware path: select patch6/10/11 and detect the input ABL's Oplus
+/* Firmware path: select patch6/10 and detect the input ABL's Oplus
  * vendor markers before enabling patch12/13. Patch7 remains host-only.
  * Call once before DynamicPatch_Apply.
  *
  * Replaces DynamicPatchLib_EnsureInit() from the deleted PatchTable.c. */
 void DynamicPatchLib_EnsureInit(void);
+
+/* Firmware path with explicit mode-2 selection from WantProfileSpoof.
+ * Nonzero enables patch11a/11b/11c; zero skips the entire patch. */
+void DynamicPatchLib_EnsureInitWithMode2(int enable_mode2);
 
 /* Host path: runtime scope selector. Aggregates the active table from:
  *   - (if oem == GBL_OEM_OPLUS) the OEM oplus group, then

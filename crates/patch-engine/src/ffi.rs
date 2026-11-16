@@ -85,10 +85,16 @@ static mut ACTIVE: Option<Engine> = None;
 /// detects Oplus from the input ABL before enabling patch12/13.
 #[no_mangle]
 pub extern "C" fn DynamicPatchLib_EnsureInit() {
+    DynamicPatchLib_EnsureInitWithMode2(0);
+}
+
+/// Firmware entry point with explicit mode-2 selection from the manifest.
+#[no_mangle]
+pub extern "C" fn DynamicPatchLib_EnsureInitWithMode2(enable_mode2: core::ffi::c_int) {
     unsafe {
         #[allow(static_mut_refs)]
         {
-            ACTIVE = Some(Engine::ensure_init());
+            ACTIVE = Some(Engine::ensure_init().with_mode2(enable_mode2 != 0));
         }
     }
 }
@@ -211,7 +217,17 @@ mod tests {
             DynamicPatch_Apply(buf.as_mut_ptr(), buf.len() as u32, &mut r);
         }
         assert_eq!(r.applied_count, 0);
-        assert_eq!(r.missed_count, 3);
+        assert_eq!(r.missed_count, 2);
         assert_eq!(r.worst_outcome, CPatchWorst::MandatoryMiss);
+
+        for (enabled, expected_misses) in [(0, 2), (1, 3), (0, 2)] {
+            DynamicPatchLib_EnsureInitWithMode2(enabled);
+            unsafe {
+                DynamicPatch_Apply(buf.as_mut_ptr(), buf.len() as u32, &mut r);
+            }
+            assert_eq!(r.applied_count, 0);
+            assert_eq!(r.missed_count, expected_misses);
+            assert_eq!(r.worst_outcome, CPatchWorst::MandatoryMiss);
+        }
     }
 }

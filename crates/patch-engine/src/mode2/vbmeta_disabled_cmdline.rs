@@ -1,4 +1,4 @@
-//! patch11c — emit verifier metadata for disabled vbmeta.
+//! Mode-2 patch11c — emit verifier metadata for disabled vbmeta.
 //!
 //! libavb deliberately skips `avb_append_options` when the top-level
 //! vbmeta has `AVB_VBMETA_IMAGE_FLAGS_VERIFICATION_DISABLED` set.  A

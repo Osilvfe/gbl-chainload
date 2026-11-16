@@ -8,6 +8,7 @@
 #
 # Feature shape mirrors PR1:
 #   - `abl_permissive` module — always compiled (firmware + host).
+#   - `mode2` module         — patch11 compiled always, enabled only in mode 2.
 #   - `oem/oplus` module     — patch12/13 shared; patch7 is host-only.
 #   - `retired/*`            — host-only (reference impl, dead code).
 #

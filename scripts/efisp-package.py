@@ -5,7 +5,7 @@ PR2 Task 8 consolidated the 7 host C tools into a single `gbl`
 multicall binary; this script now chains its subcommands:
 
     gbl unwrap <abl.img> <extracted.efi>
-    gbl patch  --in <extracted.efi> --out <patched.efi> [--oem ID]
+    gbl patch  --in <extracted.efi> --out <patched.efi> --mode <N> [--oem ID]
                [--require-patch11]
     gbl mode2 derive <vbmeta> -o <toml>      (mode 2 only)
     gbl mode2 compile <toml>  -o <profile.bin>
@@ -112,10 +112,10 @@ def main():
                                   "none (default) skips them; allowed for any --mode")
     ap.add_argument("--experimental-vbmeta-cmdline", action="store_true",
                     help="deprecated no-op: this edit is now patch11c and "
-                         "is applied automatically")
+                         "is applied automatically in mode 2 only")
     ap.add_argument("--require-patch11", action="store_true",
-                    help="fail unless patch11a/11b/11c all apply "
-                         "(enabled automatically for --mode 2)")
+                    help="require patch11a/11b/11c; only valid with --mode 2 "
+                         "(enabled automatically for that mode)")
     ap.add_argument("--out", help="output path "
                     "(default: dist/efisp-payload/<abl>-mode<N>.efi)")
     ap.add_argument("--version", action="store_true",
@@ -135,6 +135,9 @@ def main():
     for req in ("abl", "mode", "efi"):
         if not getattr(args, req):
             die(f"--{req} is required")
+
+    if args.require_patch11 and args.mode != "2":
+        die("--require-patch11 is only valid for --mode 2")
 
     # --- pre-flight: every gate fires before any tool runs ---
     for f in (args.abl, args.efi):
@@ -171,7 +174,8 @@ def main():
 
         # 2. patch — abl_permissive is always applied; --oem is passed
         # through for any mode (decoupled from --mode post-Task-13).
-        patch_argv = [gbl_bin, "patch", "--in", extracted, "--out", patched]
+        patch_argv = [gbl_bin, "patch", "--in", extracted, "--out", patched,
+                      "--mode", args.mode]
         if args.oem:
             patch_argv += ["--oem", args.oem]
         if args.mode == "2" or args.require_patch11:
