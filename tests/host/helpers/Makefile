@@ -13,12 +13,14 @@ PROJ := $(realpath ../../..)
 PE_UTILS_LIB := $(PROJ)/target/release/libpe_utils.a
 GBLP1_LIB    := $(PROJ)/target/release/libgblp1.a
 MODE2_LIB    := $(PROJ)/target/release/libmode2_profile_core.a
+MODE2_REWRITE_SRC = ../../../GblChainloadPkg/Library/ProtocolHookLib/ProfileRewrite.c
 
 BINS = test_efisp_scan
 BINS += test_crc32
 BINS += test_sha256
 BINS += test_pe_sanity
 BINS += test_manifest_parse
+BINS += test_mode2_runtime
 
 # Default target up here so we don't accidentally trigger the cargo
 # staticlib rule when running bare `make`.
@@ -52,6 +54,21 @@ test_manifest_parse: test_manifest_parse.c \
                      $(GBLP1_LIB)
 	$(CC) $(CFLAGS) -DGBL_HOST_BUILD=1 -o $@ test_manifest_parse.c $(GBLP1_LIB)
 
+MODE2_RUNTIME_SOURCES = ../../../GblChainloadPkg/Application/GblChainload/BootFlow.c \
+                       ../../../GblChainloadPkg/Library/ProtocolHookLib/QseecomHook.c \
+                       ../../../GblChainloadPkg/Library/ProtocolHookLib/ProfileOverlay.c
+MODE2_RUNTIME_HEADERS = $(wildcard ../../../GblChainloadPkg/Library/ProtocolHookLib/*.h) \
+                       $(wildcard ../../../GblChainloadPkg/Include/Library/*.h)
+
+test_mode2_runtime: test_mode2_runtime.c $(MODE2_RUNTIME_SOURCES) \
+                    $(MODE2_RUNTIME_HEADERS) $(MODE2_REWRITE_SRC)
+	$(CC) $(CFLAGS) -fshort-wchar -DGBL_HOST_BUILD=1 -DGBL_DEBUG=1 -DGBL_VERBOSE=1 \
+	  -D__FORTIFY_SOURCE=1 -DDISABLE_NEW_DEPRECATED_INTERFACES \
+	  -I../../../GblChainloadPkg/Include \
+	  -I../../../edk2/MdePkg/Include -I../../../edk2/MdePkg/Include/X64 \
+	  -I../../../edk2/QcomModulePkg/Include \
+	  -o $@ test_mode2_runtime.c $(MODE2_REWRITE_SRC)
+
 BINS += parser_harness
 
 parser_harness: parser_harness.c $(GBLP1_LIB)
@@ -72,8 +89,6 @@ BINS += locate_overlay_host
 
 locate_overlay_host: locate_overlay_host.c
 	$(CC) $(CFLAGS) -o $@ $<
-
-MODE2_REWRITE_SRC = ../../../GblChainloadPkg/Library/ProtocolHookLib/ProfileRewrite.c
 
 BINS += mode2_harness
 

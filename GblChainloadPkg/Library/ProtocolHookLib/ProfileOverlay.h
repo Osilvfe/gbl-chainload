@@ -10,6 +10,8 @@
 
 #include "../../../crates/mode2-profile-core/include/mode2_profile_ffi.h"
 
+VOID EFIAPI ProfileOverlay_ClearProfile (VOID);
+
 /* Store a validated profile. Copies *Profile into module state and
    sets the internal gMode2HasProfile flag. Called once by BootFlow. */
 VOID EFIAPI ProfileOverlay_SetProfile (IN CONST struct gbl_mode2_profile *Profile);

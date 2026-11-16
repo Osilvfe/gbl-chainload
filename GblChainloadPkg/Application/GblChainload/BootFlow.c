@@ -126,6 +126,9 @@ BootFlowChainLoad (VOID)
 
   GBL_INFO ("BootFlow: start\n");
 
+  ProfileOverlay_ClearProfile ();
+  GblFastbootSetMode2Warning (NULL);
+
   GblPayload_LogProvenance (gImageHandle);
 
   {
@@ -139,6 +142,27 @@ BootFlowChainLoad (VOID)
     GBL_INFO ("BootFlow: manifest — fakelock=%u spoof=%u\n",
               (UINT32)gManifest.WantFakelockHook,
               (UINT32)gManifest.WantProfileSpoof);
+  }
+
+  if (gManifest.WantProfileSpoof) {
+    struct gbl_mode2_profile Mode2Profile;
+    EFI_STATUS M2Status =
+        GblPayload_LoadMode2Profile (gImageHandle, &Mode2Profile);
+    if (EFI_ERROR (M2Status)) {
+      GBL_INFO ("BootFlow: mode-2 profile unavailable (%r) — aborting chain-load\n",
+                M2Status);
+      Print (
+        (M2Status == EFI_NOT_FOUND)
+          ? L"GBL: MODE-2 PROFILE MISSING — returning to GBL fastboot\n"
+          : L"GBL: MODE-2 PROFILE INVALID — returning to GBL fastboot\n");
+      GblFastbootSetMode2Warning (
+        (M2Status == EFI_NOT_FOUND)
+          ? "MODE-2 PROFILE MISSING - chainload aborted"
+          : "MODE-2 PROFILE INVALID - chainload aborted");
+      return M2Status;
+    }
+    ProfileOverlay_SetProfile (&Mode2Profile);
+    GBL_INFO ("BootFlow: mode-2 profile loaded — spoof active\n");
   }
 
   /* Tier 1: cached ABL via GBLP1 overlay on EFISP. */
@@ -156,38 +180,13 @@ BootFlowChainLoad (VOID)
       GBL_INFO ("BootFlow: Tier 2 failed (%r), falling through to fastboot\n",
                 Status);
       /* Tier 3: return — Entry.c → EnterFastboot. */
+      ProfileOverlay_ClearProfile ();
       return Status;
     }
     Origin = "dynamic";
   }
 
   GBL_INFO ("BootFlow: ABL loaded via %a (size=%u)\n", Origin, PeSize);
-
-  if (gManifest.WantProfileSpoof) {
-    struct gbl_mode2_profile Mode2Profile;
-    EFI_STATUS M2Status =
-        GblPayload_LoadMode2Profile (gImageHandle, &Mode2Profile);
-    if (!EFI_ERROR (M2Status)) {
-      ProfileOverlay_SetProfile (&Mode2Profile);
-      GBL_INFO ("BootFlow: mode-2 profile loaded — spoof active\n");
-    } else {
-      GBL_INFO ("BootFlow: mode-2 profile unavailable (%r) — honest boot\n",
-                M2Status);
-      /* Surface the missing/invalid-profile state on the boot console
-         itself. The FastbootLib warning line (set below) only renders if
-         gbl-chainload's own FastbootMenu is reached — a healthy honest
-         boot chainloads ABL and never shows it, so Print() is the only
-         surface the user actually sees, and it shows in every build. */
-      Print (
-        (M2Status == EFI_NOT_FOUND)
-          ? L"GBL: MODE-2 PROFILE MISSING — booting honest, attestation will fail\n"
-          : L"GBL: MODE-2 PROFILE INVALID — booting honest, attestation will fail\n");
-      GblFastbootSetMode2Warning (
-        (M2Status == EFI_NOT_FOUND)
-          ? "MODE-2 PROFILE MISSING - booting honest, attestation will fail"
-          : "MODE-2 PROFILE INVALID - booting honest, attestation will fail");
-    }
-  }
 
   /* Install protocol hooks (universal baseline + mode-N overlay).
      Mode-0 installs the universal observation/preservation hooks but no
@@ -197,6 +196,7 @@ BootFlowChainLoad (VOID)
   if (EFI_ERROR (Status)) {
     Print (L"BootFlow: FATAL — hook install failed (%r), aborting\n", Status);
     FreePool (Pe);
+    ProfileOverlay_ClearProfile ();
     return Status;
   }
 
@@ -213,6 +213,7 @@ BootFlowChainLoad (VOID)
   Pe = NULL;
   if (EFI_ERROR (Status)) {
     Print (L"BootFlow: FATAL — LoadImage failed (%r)\n", Status);
+    ProfileOverlay_ClearProfile ();
     return Status;
   }
 
@@ -225,5 +226,6 @@ BootFlowChainLoad (VOID)
   if (ImageHandle != NULL) {
     gBS->UnloadImage (ImageHandle);
   }
+  ProfileOverlay_ClearProfile ();
   return EFI_LOAD_ERROR;
 }

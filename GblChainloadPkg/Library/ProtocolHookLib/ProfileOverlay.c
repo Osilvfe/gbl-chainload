@@ -15,6 +15,12 @@ STATIC struct gbl_mode2_profile  gMode2Profile;
 STATIC BOOLEAN                   gMode2HasProfile = FALSE;
 
 VOID EFIAPI
+ProfileOverlay_ClearProfile (VOID) {
+  gMode2HasProfile = FALSE;
+  ZeroMem (&gMode2Profile, sizeof (gMode2Profile));
+}
+
+VOID EFIAPI
 ProfileOverlay_SetProfile (IN CONST struct gbl_mode2_profile *Profile) {
   if (Profile == NULL) return;
   CopyMem (&gMode2Profile, Profile, sizeof (gMode2Profile));

@@ -50,6 +50,7 @@ STATIC UINT32 gOplusSecHandle = (UINT32)-1;
  * latter matters because keymaster is loaded by LoadSecureApps before our
  * StartApp hook installs (AppId 0xFFFF0001 on macan/sm8845). -1U == unknown. */
 STATIC UINT32 gKeymasterHandle = (UINT32)-1;
+STATIC UINT32 gProfileKeymasterHandle = (UINT32)-1;
 
 /* OplusSec TA is identified at QseecomStartApp by 16-byte EFI_GUID rather
  * than ASCII name (Ghidra G1 on LinuxLoader_infiniti.efi mem:0007f1e0).
@@ -502,6 +503,9 @@ HookedStartApp (
       gKeymasterHandle = OutHandle;
       GBL_INFO ("qsee-start: tagged \"%a\" h=%u as KeyMaster\n",
                 AppNameAscii, OutHandle);
+      if (Handle != NULL && OutHandle != 0 && OutHandle != (UINT32)-1) {
+        gProfileKeymasterHandle = OutHandle;
+      }
     }
 
     /* OplusSec: AppName is a 16-byte EFI_GUID, not ASCII (Ghidra G1).
@@ -605,9 +609,12 @@ HookedSendCmd (
 
   /* Profile-spoof policy: rewrite KM SET_ROT/SET_VERSION/SET_BOOT_STATE/SET_VBH
      send buffers in place from the loaded profile before forwarding to
-     TZ. Applies on the first-entry path only; reentrant calls below
+     TZ, only for a handle confirmed by a successful named KeyMaster start.
+     The command-range inference remains exclusive to the fakelock policy.
+     Applies on the first-entry path only; reentrant calls below
      forward the (already-rewritten) buffer untouched. */
-  if (gManifest.WantProfileSpoof && First && SendBuf != NULL) {
+  if (gManifest.WantProfileSpoof && First && SendBuf != NULL &&
+      Handle == gProfileKeymasterHandle && Handle != (UINT32)-1) {
     ProfileOverlay_RewriteKmSend (CmdId, SendBuf, SendLen);
   }
 

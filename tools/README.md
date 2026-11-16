@@ -316,6 +316,12 @@ For mode 2, `--stock-vbmeta` is the device's main vbmeta image used to
 derive the 120-byte mode-2 profile. It is separate from any partition
 image used with `gbl avb graft`.
 
+Firmware validates the mode-2 profile before either cached or dynamic ABL
+loading. Missing or invalid profiles return to GBL fastboot without
+chainloading; there is no automatic "honest boot" fallback for a cached ABL
+already carrying patch11. QSEE profile rewrites require a successfully
+named `keymaster` / `keymaster64` handle, not just a matching command number.
+
 ### Testing and device staging
 
 Verify the packaged payload before booting it:
