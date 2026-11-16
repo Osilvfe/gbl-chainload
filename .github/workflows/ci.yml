@@ -3,6 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   # Force-pushes to feature branches cancel any in-flight run.
@@ -12,6 +13,40 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize EDK2
+        run: git submodule update --init edk2
+      - name: Install native build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 python3-setuptools uuid-dev nasm acpica-tools gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-none,aarch64-linux-android
+      - name: Select Android NDK r27c
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;27.2.12479018'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Build release firmware, recovery and host tools
+        run: bash scripts/build.sh
+      - name: Build debug firmware
+        run: bash scripts/build-native.sh --debug --output dist/gbl-chainload-debug.efi
+      - name: Smoke-test native host tool
+        run: dist/host/gbl --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-build
+          path: |
+            dist/gbl-chainload*.efi
+            dist/recovery/gbl
+            dist/recovery/SHA256SUMS
+            dist/host/gbl
+          if-no-files-found: error
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
