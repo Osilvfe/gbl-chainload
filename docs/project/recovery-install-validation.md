@@ -47,20 +47,22 @@ patch-signature parity, `gbl-commit` atomic-write, BlockIO reader smoke,
 config-table override simulation, full-buffer scan, and crypto
 conformance (SHA-256 / CRC-32 known-answer vectors).
 
-### A3 — Cross-compiled recovery tools (Docker + Android NDK r27)
+### A3 — Cross-compiled recovery tool (local Android NDK)
 
 ```bash
+export ANDROID_NDK_HOME=/path/to/android-ndk
+rustup target add aarch64-linux-android
 bash scripts/build-recovery-tools.sh
 ```
 
-Output: `dist/recovery/{fv-unwrap,abl-patcher,gbl-pack,gbl-commit}` +
+Output: `dist/recovery/gbl` (multicall) +
 `dist/recovery/SHA256SUMS`
 
-Success: script prints `ls -la dist/recovery/` listing all four binaries
-and exits 0. These are aarch64-Android static binaries; they run in TWRP
-without libc.so. The script handles the WSL/Docker-Desktop credential
-quirk internally (`DOCKER_CONFIG` export) — a plain invocation is
-sufficient.
+Success: script exits 0 and `(cd dist/recovery && sha256sum -c SHA256SUMS)`
+passes.
+The binary targets aarch64 Android API 31; verify compatibility with the
+actual recovery runtime. No container or static-linking guarantee is
+implied. Use `--check-only` to validate toolchain discovery without a build.
 
 The cross-compiled tools (A3) are everything the recovery installer ZIP
 will bundle; assembling that ZIP is a follow-up (see

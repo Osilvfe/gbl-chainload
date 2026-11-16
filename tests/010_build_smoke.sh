@@ -5,31 +5,31 @@
 # (and dist/gbl-chainload-<suffix>.efi when --auto/--debug/--verbose). The
 # per-mode loop is gone — activation lives in the runtime GBLP1 manifest.
 #
-# Requires docker (scripts/build.sh runs EDK-II inside a container). If docker
-# is unavailable on the runner, skip cleanly — host-side lint/scan/patch tests
+# Requires local Rust, AArch64 GCC and EDK2. If prerequisites
+# are unavailable on the runner, skip cleanly — host-side lint/scan/patch tests
 # still run, the EFI compile path simply isn't validated here.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 fail=0
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "SKIP: 010_build_smoke — docker not in PATH on this runner"
-  echo "  (PATH=$PATH)"
-  ls -la /usr/bin/docker 2>&1 | head -1 || true
+for tool in cargo rustup make python3 aarch64-linux-gnu-gcc; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "SKIP: 010_build_smoke — missing $tool"
+    exit 0
+  fi
+done
+if [[ ! -d edk2/BaseTools ]] || ! rustup target list --installed | grep -qx aarch64-unknown-none; then
+  echo "SKIP: 010_build_smoke — initialize edk2 and install Rust target aarch64-unknown-none"
   exit 0
 fi
 
-# Build verbose first, then non-verbose last. build-inside-docker.sh always
-# copies its output to dist/gbl-chainload.efi as well as the suffixed name,
-# so we order the runs so the verbose build does not clobber the non-verbose
-# artifact that the VERBOSE-strip lint below reads.
 echo "== building dist/gbl-chainload-auto-debug-verbose.efi =="
-./scripts/build.sh --auto --debug --verbose
+./scripts/build.sh --auto --debug --verbose --no-recovery --no-host
 test -f dist/gbl-chainload-auto-debug-verbose.efi \
   || { echo "FAIL: dist/gbl-chainload-auto-debug-verbose.efi missing"; exit 1; }
 
 echo "== building dist/gbl-chainload.efi =="
-./scripts/build.sh
+./scripts/build.sh --no-recovery --no-host
 test -f dist/gbl-chainload.efi || { echo "FAIL: dist/gbl-chainload.efi missing"; exit 1; }
 
 

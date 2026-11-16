@@ -111,7 +111,7 @@ if grep -RnE -- '-D[[:space:]]*GBL_MODE[=[:space:]]|DEFINE[[:space:]]+GBL_MODE[[
     GblChainloadPkg/GblChainloadPkg.dsc \
     GblChainloadPkg/Application \
     GblChainloadPkg/Library \
-    scripts/build.sh scripts/build-inside-docker.sh 2>/dev/null; then
+    scripts/build.sh scripts/build-native.sh 2>/dev/null; then
   echo "FAIL: GBL_MODE residue in build system — Task 11 collapse incomplete"
   exit 1
 fi

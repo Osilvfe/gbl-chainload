@@ -88,7 +88,11 @@ mode-1 下，VB `WRITE_CONFIG` 是**先修正为 unlocked，再转发**，并非
 
 ### Linux 本机构建
 
-需要 Git、Python 3、make、主机 C/C++ 编译环境、Rust / Cargo，以及提供 `aarch64-linux-gnu-gcc` 和对应 binutils 的 AArch64 GNU 交叉工具链。EDK2 BaseTools 的其他依赖可参考 [Dockerfile](docker/Dockerfile)。
+需要 Rust / Cargo（1.85 或更新版本），以及提供 `aarch64-linux-gnu-gcc` 和对应 binutils 的 AArch64 GNU 交叉工具链。Debian / Ubuntu 可先安装本机依赖：
+
+```bash
+sudo apt-get install git build-essential python3 python3-setuptools uuid-dev nasm acpica-tools gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+```
 
 ```bash
 git clone https://github.com/Osilvfe/gbl-chainload.git
@@ -115,19 +119,19 @@ scripts/build-native.sh --release --output dist/gbl-chainload.efi
 
 `cargo` 负责 Rust 工具和静态库；最终 EFI 仍需要 EDK2 链接，不能只运行一次 `cargo build` 就得到完整固件。
 
-### Docker 构建
+### 本机统一构建入口
 
-Docker 是用于统一 CI 和跨平台开发工具链的可选环境，不是运行固件的依赖。已经配好工具链的 Linux 主机可以直接使用上面的本机构建流程；容器本身不保证字节级可复现，也不能自动解决设备启动问题。
-
-已有 Docker 环境时，也可以使用统一构建入口：
+所有阶段均使用本机安装的工具链，已移除 Docker 构建支持。准备好上述 Linux 依赖后，可以使用统一入口：
 
 ```bash
 scripts/build.sh --debug --no-recovery
 ```
 
-该示例生成 `dist/gbl-chainload-debug.efi` 和 `dist/host/gbl`；去掉 `--no-recovery` 还会构建 Android recovery 端工具。固件和 recovery 在容器内构建，主机工具阶段仍需要本机 Cargo，也可以使用 `--no-host` 跳过。`--auto`、`--debug`、`--verbose` 分别控制启动策略和日志输出，**没有 `--mode` 构建参数**。
+该示例生成 `dist/gbl-chainload-debug.efi` 和 `dist/host/gbl`。统一入口默认关闭调试日志，`--debug` 开启 GBL 调试日志；`--auto` 和 `--verbose` 分别控制启动策略和详细日志，**没有 `--mode` 构建参数**。使用 `--no-host` 可跳过主机工具。
 
-此脚本会清空 `Build/`。如果还要集成 UniXNU，请先构建 GBL，再构建 UniXNU，避免删除刚生成的组件。使用 Docker 产物套用后面的拼接示例时，应把主机工具路径改为 `--bin-dir dist/host`，基础 EFI 改为 `--efi dist/gbl-chainload-debug.efi`，并通过 `dist/host/gbl` 执行 `inspect`。
+需要同时构建 Android recovery 工具时，请安装 Android NDK（原环境使用 r27c），设置 `ANDROID_NDK_HOME` 为其目录，执行 `rustup target add aarch64-linux-android`，再去掉 `--no-recovery`。脚本会在固件编译前检查 recovery 前置条件。跨平台主机工具链要求见 [tools/README.md](tools/README.md#building)。
+
+脚本保留 `Build/`，包括 UniXNU 源码缓存和组件。使用统一入口产物套用后面的拼接示例时，应把主机工具路径改为 `--bin-dir dist/host`，基础 EFI 改为 `--efi dist/gbl-chainload-debug.efi`，并通过 `dist/host/gbl` 执行 `inspect`。
 
 ## 拼接设备专用 EFISP
 
@@ -308,11 +312,14 @@ bash tests/host/088_patch7_multi_abl.sh
 bash tests/host/097_patch11_multi_abl.sh
 bash tests/host/098_patch12_patch13_oem.sh
 bash tests/host/099_mode2_runtime.sh
+bash tests/host/100_native_build.sh
 ```
 
 `098` 对所有样本同时验证主机与固件引擎的 mode-0 / mode-1 / mode-2：模式 0/1 没有 patch11，模式 2 才启用；同时检查 OEM 选择、品牌识别、patch12/13 的 6+3 处改写、重复应用及 GPT 写入位置不变。
 
 `099` 使用模拟固件服务执行真实固件 C 启动流程与 QSEE 包装函数：profile 失败时在访问 ABL 前中止，重试清除遗留状态，且只有已确认的 KeyMaster handle 接受 mode-2 改写。这不代替设备测试。
+
+`100` 使用模拟工具链检查本机构建调度、NDK 发现、跨平台产物路径、校验和及缓存保留；本机依赖齐全时，`010_build_smoke.sh` 实际构建固件，`084` 在对应工具链可用时验证真实跨平台二进制。
 
 全量测试需要额外准备：部分 recovery 测试镜像通过 Git LFS 保存，需使用 `git lfs pull` 获取真实内容；部分 mode-2 parity 测试还依赖 `082_mode2_profile_parity.sh` 生成的 golden 文件及包括 `avbtool` 在内的派生测试前置条件。应先取得真实样本并补齐参考文件再判断全量测试结果，不能把 LFS 指针当作镜像，也不能仅凭前置文件缺失就认定补丁回归。
 

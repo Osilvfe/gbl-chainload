@@ -25,10 +25,10 @@ under the hood.
 
 ## Building
 
-All builds go through a single docker image:
+All builds use locally installed toolchains. For the native host tool:
 
 ```
-docker build -t gbl-chainload-build:latest -f docker/Dockerfile .
+cargo build --release --locked -p gbl
 ```
 
 | Platform                    | Output                  | How                                                                            |
@@ -37,11 +37,35 @@ docker build -t gbl-chainload-build:latest -f docker/Dockerfile .
 | Static Linux musl release   | `dist/linux/gbl`        | `scripts/build-cross-tools.sh linux`                                           |
 | Android (aarch64, recovery) | `dist/recovery/gbl`     | `scripts/build-recovery-tools.sh`                                              |
 | Windows (x86_64 PE)         | `dist/windows/gbl.exe`  | `scripts/build-cross-tools.sh windows`                                         |
-| macOS (universal Mach-O)    | `dist/macos/gbl`        | `scripts/build-cross-tools.sh macos` (x86_64 + arm64 merged via `llvm-lipo`)   |
+| macOS (universal Mach-O)    | `dist/macos/gbl`        | `scripts/build-cross-tools.sh macos` (x86_64 + arm64 merged via `lipo` / `llvm-lipo`) |
 
 `scripts/build.sh` orchestrates the full four-phase build (cargo workspace
-+ EDK2 firmware + recovery cross-build + host build) and is what CI runs.
-`SHA256SUMS` is emitted alongside every `dist/<os>/gbl` artifact.
++ EDK2 firmware + recovery cross-build + host build). CI builds firmware
+and each supported host platform with local toolchains.
+`SHA256SUMS` is emitted by the recovery and cross-platform scripts.
+
+Use Rust / Cargo 1.85 or newer and install the Rust target(s) for each
+cross build with `rustup target add <target>`:
+
+| Platform | Rust target(s) | Local linker requirements |
+| --- | --- | --- |
+| Linux musl | `x86_64-unknown-linux-musl` | `musl-gcc` (`musl-tools` on Debian / Ubuntu), on an x86_64 Linux host |
+| Windows | `x86_64-pc-windows-gnu` | `x86_64-w64-mingw32-gcc` and `x86_64-w64-mingw32-dlltool` (`mingw-w64`) |
+| macOS | `x86_64-apple-darwin`, `aarch64-apple-darwin` | Apple clang on macOS, or Zig (previously 0.13.0) on Linux; `lipo` / `llvm-lipo` to merge slices |
+| Android recovery | `aarch64-linux-android` | Android NDK with API 31 clang (previously r27c) |
+
+Set `ANDROID_NDK_HOME` (also accepts `ANDROID_NDK_ROOT` / `ANDROID_NDK`)
+for recovery builds. `NDK_BIN` or
+`CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` may select an existing NDK
+toolchain directly. `scripts/build-recovery-tools.sh --check-only` checks
+prerequisites without building. The output targets the Android recovery
+runtime; it is not a Linux musl binary or a guarantee of static linking.
+
+`scripts/build-cross-tools.sh all` requires every platform's toolchain on
+the host. CI instead builds Linux / Windows on Linux runners and macOS
+on a macOS runner. All helpers require Python 3 for checksums; generated
+Zig linker wrappers live under ignored `Build/native-toolchain/`, not
+in system directories.
 
 `gbl --version` reports the Cargo package version. The compiled-in
 `packer_version` string embedded in `gbl pack` output picks up the in-tree
@@ -367,16 +391,12 @@ hook will block such commands inside an agent session.
 |------------|--------------|--------------|---------|---------|-------|
 | `gbl`      | ✓            | ✓            | ✓       | ✓ *     | ✓     |
 
-\* Windows build requires `x86_64-w64-mingw32-dlltool` in the docker
-image (mingw-w64 binutils). Currently missing from `docker/Dockerfile`;
-test 084 SKIPs cleanly until added. See
-`docs/superpowers/pr-evidence/2026-05-23-rust-consolidation-parity.md`
-for the follow-up note.
+\* Windows builds require mingw-w64 GCC and dlltool. Test 084 checks each
+platform independently and skips targets whose local prerequisites are
+missing. CI builds and smoke-tests all three desktop release platforms.
 
-The host (native) build uses the system Rust toolchain. All cross
-targets use the docker build image's pinned Rust (currently 1.85) +
-zig for the Windows/macOS targets and the Android NDK for the recovery
-target.
+Both native and cross builds use the host's Rust toolchain and the
+linkers listed above; no build container is required.
 
 ## Crate map
 

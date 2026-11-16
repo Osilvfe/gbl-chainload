@@ -36,6 +36,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y liblzma-dev shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 python3-setuptools uuid-dev nasm acpica-tools gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu liblzma-dev shellcheck
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-none
       - name: Run all tests
         run: bash tests/runall.sh

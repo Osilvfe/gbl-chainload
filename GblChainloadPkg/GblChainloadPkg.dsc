@@ -3,7 +3,7 @@
 #
 #  Library mappings mirror QcomModulePkg.dsc so we get the same dep graph as
 #  LinuxLoader.efi. Build-tuning flags (GBL_AUTO / GBL_DEBUG / GBL_VERBOSE)
-#  are passed via -D from scripts/build-inside-docker.sh. Activation of
+#  are passed via -D from scripts/build-native.sh. Activation of
 #  fakelock / profile-spoof is manifest-driven at runtime — there is no
 #  per-mode compile flag.
 ##
@@ -61,7 +61,7 @@
   DEFINE INIT_BIN                         = /init
 
   # Build-tuning flags — overridden at build time via -D from
-  # build-inside-docker.sh. Activation of fakelock / profile-spoof is NOT
+  # build-native.sh. Activation of fakelock / profile-spoof is NOT
   # here; it is decided at runtime from the GBLP1 manifest baked into the
   # EFISP overlay.
   DEFINE GBL_AUTO                         = 0
@@ -70,7 +70,7 @@
 
   # Build name — single string identifier substituted into log banner,
   # FastbootMenu display, and the gbl-chainload_build getvar.
-  # build-inside-docker.sh constructs the suffixed form
+  # build-native.sh constructs the suffixed form
   # (e.g. gbl-chainload-auto-debug-verbose).
   DEFINE GBL_BUILD_NAME                   = gbl-chainload
 
@@ -156,8 +156,8 @@
   # those call sites out and needs no GblChainloadPkg library.
   GCC:*_*_*_ARCHCC_FLAGS  = -Wno-shift-negative-value -fstack-protector-all -Wno-varargs -fno-common -Wno-misleading-indentation -Wno-unknown-warning-option -DGBL_TRACE=1
   GCC:*_*_*_DLINK_FLAGS = -Wl,-Ttext=0x0
-  # PR2 Task 4: link crates/gblp1's aarch64-unknown-uefi staticlib (built
-  # ahead of the EDK2 build by scripts/build-inside-docker.sh). This
+  # PR2 Task 4: link crates/gblp1's aarch64-unknown-none staticlib (built
+  # ahead of the EDK2 build by scripts/build-native.sh). This
   # supplies gbl_payload_*, gbl_sha256*, and gbl_crc32 — the parser +
   # hash + CRC API formerly hosted in GblPayloadLib's deleted C sources.
   #
@@ -169,7 +169,7 @@
   # because GblPayload.c hasn't been linked yet at that point.
   #
   # The target triple is `aarch64-unknown-none` (bare-metal ELF) — not
-  # `aarch64-unknown-uefi` — because EDK2's GCC build path links via
+  # `aarch64-unknown-none` — because EDK2's GCC build path links via
   # aarch64-linux-gnu-ld (GNU ld), which only reads ELF. The UEFI
   # target emits COFF/PE objects, which ld rejects with "file format
   # not recognized". The crate's `#[panic_handler]` is gated on

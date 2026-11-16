@@ -2,7 +2,7 @@
 //!
 //! Replaces `tools/fv-unwrap/fv-unwrap.c` byte-for-byte. Same FFS / GUID-
 //! defined section / FV-image walk; LZMA-alone decompression is now via
-//! `lzma-rs` instead of the cross-built `liblzma` the Dockerfile carried.
+//! `lzma-rs` instead of the legacy C toolchain's cross-built `liblzma`.
 //!
 //! On stdout we print exactly one diagnostic the C tool printed —
 //!   `efisp-marker: present` / `efisp-marker: absent`

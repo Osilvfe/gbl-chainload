@@ -25,7 +25,7 @@ BUILT_EFI=dist/mode-2-debug.efi
 
 mkdir -p "$OUT" dist
 
-echo "==> Compiling gbl multicall (fail-fast before slow Docker build)"
+echo "==> Compiling gbl multicall (fail-fast before slow firmware build)"
 cargo build --release --quiet -p gbl
 PATH="$PWD/target/release:$PATH"; export PATH
 

@@ -24,8 +24,8 @@ if [[ -f tests/030_signature_lint.sh ]]; then
   bash tests/030_signature_lint.sh
 fi
 
-# Host tests (tests/host/0??_*.sh) — fast, run before build smoke.
-for t in tests/host/0[0-9][0-9]_*.sh; do
+# Host tests (tests/host/???_*.sh) — fast, run before build smoke.
+for t in tests/host/[0-9][0-9][0-9]_*.sh; do
   [ -f "$t" ] || continue
   echo "== $(basename "$t" .sh) =="
   bash "$t"

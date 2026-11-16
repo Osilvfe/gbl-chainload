@@ -1,23 +1,59 @@
 #!/usr/bin/env bash
-# scripts/build-recovery-tools.sh — build the aarch64-Android recovery
-# binary inside the docker build image. Outputs dist/recovery/gbl.
-#
-# PR2 Task 8: the 7 host C tools collapsed into the `gbl` multicall
-# binary, so this script now builds one Rust target.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# WSL/Docker-Desktop credential-helper quirk: an empty DOCKER_CONFIG dir
-# avoids the desktop.exe credstore lookup that fails under WSL.
-export DOCKER_CONFIG="${DOCKER_CONFIG:-$(mktemp -d)}"
+CHECK_ONLY=0
+case "${1:-}" in
+  "") ;;
+  --check-only) CHECK_ONLY=1 ;;
+  -h|--help)
+    echo "Usage: $0 [--check-only]"
+    echo "Set ANDROID_NDK_HOME (or ANDROID_NDK_ROOT / ANDROID_NDK), NDK_BIN,"
+    echo "or CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER to a local Android NDK."
+    exit 0 ;;
+  *) echo "unknown flag: $1" >&2; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { echo "too many arguments" >&2; exit 2; }
 
+for tool in cargo rustup python3; do
+  command -v "$tool" >/dev/null || { echo "missing build tool: $tool" >&2; exit 1; }
+done
+rustup target list --installed | grep -qx aarch64-linux-android || {
+  echo "missing Rust target: run rustup target add aarch64-linux-android" >&2
+  exit 1
+}
+
+NDK_ROOT="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-${ANDROID_NDK:-}}}"
+if [[ -z "${NDK_BIN:-}" && -n "$NDK_ROOT" ]]; then
+  case "$(uname -s)" in
+    Linux) NDK_HOST=linux-x86_64 ;;
+    Darwin) NDK_HOST=darwin-x86_64 ;;
+    *) echo "unsupported Android NDK host: $(uname -s)" >&2; exit 1 ;;
+  esac
+  NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST/bin"
+fi
+if [[ -n "${NDK_BIN:-}" ]]; then
+  export PATH="$NDK_BIN:$PATH"
+fi
+LINKER="${CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER:-aarch64-linux-android31-clang}"
+command -v "$LINKER" >/dev/null || {
+  echo "Android NDK linker not found: $LINKER" >&2
+  echo "Set ANDROID_NDK_HOME to an installed NDK, or skip recovery with --no-recovery." >&2
+  exit 1
+}
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$LINKER"
+
+if [[ $CHECK_ONLY -eq 1 ]]; then exit 0; fi
+
+cargo build --release --locked --target aarch64-linux-android -p gbl
 mkdir -p dist/recovery
+cp "${CARGO_TARGET_DIR:-target}/aarch64-linux-android/release/gbl" dist/recovery/gbl
+chmod +x dist/recovery/gbl
+python3 - <<'PY'
+import hashlib
+from pathlib import Path
 
-docker run --rm -v "$PWD:/work" -w /work gbl-chainload-build:latest bash -c '
-  set -e
-  cargo build --release --locked --target aarch64-linux-android -p gbl
-  install -Dm755 target/aarch64-linux-android/release/gbl dist/recovery/gbl
-  cd dist/recovery && sha256sum gbl > SHA256SUMS
-'
-
-ls -la dist/recovery/
+out = Path("dist/recovery")
+(out / "SHA256SUMS").write_text(hashlib.sha256((out / "gbl").read_bytes()).hexdigest() + "  gbl\n")
+PY
+echo "==> wrote dist/recovery/gbl"

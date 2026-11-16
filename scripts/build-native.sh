@@ -10,22 +10,28 @@
 # Neither adjustment changes the source submodule.  Both are generated under
 # Build/, which is gitignored.
 #
-# Usage: scripts/build-native.sh [--release] [--output PATH] [--prepare-only]
+# Usage: scripts/build-native.sh [--release|--debug] [--auto] [--verbose] [--output PATH] [--prepare-only]
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 DEBUG=1
+AUTO=0
+VERBOSE=0
 OUTPUT=""
 PREPARE_ONLY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --release) DEBUG=0; shift ;;
+    --debug) DEBUG=1; shift ;;
+    --auto) AUTO=1; shift ;;
+    --verbose) VERBOSE=1; shift ;;
     --output)  OUTPUT="${2:?--output requires a path}"; shift 2 ;;
     --prepare-only) PREPARE_ONLY=1; shift ;;
     -h|--help)
-      sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+      echo "Usage: scripts/build-native.sh [--release|--debug] [--auto] [--verbose] [--output PATH] [--prepare-only]"
+      echo "Build firmware with the local AArch64 GCC toolchain; debug logging is enabled by default."
       exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
@@ -61,7 +67,9 @@ GBL_CHAINLOAD_VERSION="$(head -n1 VERSION | tr -d '[:space:]')"
 [[ -n "$GBL_CHAINLOAD_VERSION" ]] || { echo "VERSION is empty" >&2; exit 1; }
 
 SUFFIX=""
-[[ $DEBUG -eq 1 ]] && SUFFIX="-debug"
+[[ $AUTO -eq 1 ]] && SUFFIX+="-auto"
+[[ $DEBUG -eq 1 ]] && SUFFIX+="-debug"
+[[ $VERBOSE -eq 1 ]] && SUFFIX+="-verbose"
 BUILD_NAME="gbl-chainload${SUFFIX}"
 OUTPUT="${OUTPUT:-dist/${BUILD_NAME}-gcc5.efi}"
 
@@ -110,7 +118,7 @@ fi
 
 echo ">>> cargo staticlibs (aarch64-unknown-none)"
 for crate in gblp1 mode2-profile-core patch-engine avb-parse; do
-  cargo build --release --target aarch64-unknown-none \
+  cargo build --release --locked --target aarch64-unknown-none \
     -p "$crate" --no-default-features
 done
 
@@ -127,11 +135,11 @@ MOD=Build/GblChainloadPkg/RELEASE_GCC5/AARCH64/GblChainloadPkg/Application/GblCh
 rm -f "$MOD/DEBUG/GblChainload.dll" "$MOD/OUTPUT/GblChainload.efi" \
       "$MOD/DEBUG/GblChainload.efi"
 
-echo ">>> EDK2 link: RELEASE GBL_DEBUG=$DEBUG"
+echo ">>> EDK2 link: RELEASE auto=$AUTO debug=$DEBUG verbose=$VERBOSE"
 build \
   -p GblChainloadPkg/GblChainloadPkg.dsc \
   -a AARCH64 -t GCC5 -b RELEASE \
-  -D GBL_AUTO=0 -D GBL_DEBUG="$DEBUG" -D GBL_VERBOSE=0 \
+  -D GBL_AUTO="$AUTO" -D GBL_DEBUG="$DEBUG" -D GBL_VERBOSE="$VERBOSE" \
   -D GBL_BUILD_NAME="$BUILD_NAME" \
   -D GBL_CHAINLOAD_VERSION="$GBL_CHAINLOAD_VERSION"
 
