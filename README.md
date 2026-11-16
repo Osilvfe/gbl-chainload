@@ -1,5 +1,7 @@
 # gbl-chainload
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 EFI System Partition (EFISP) chainloader for OnePlus/Oppo devices using Qualcomm's GBL/EFISP load mechanism. Patches the active-slot ABL in memory, installs targeted protocol hooks, and hands off to the patched ABL.
 
 ## Status

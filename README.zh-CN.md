@@ -1,0 +1,268 @@
+# gbl-chainload
+
+[English](README.md) | 简体中文
+
+面向支持 Qualcomm GBL / EFISP 加载机制的设备的 AArch64 UEFI 链式加载程序。本项目在内存中修改 ABL、安装必要的协议拦截，再交接给修改后的 ABL 启动 Android；同时提供 GBL FastbootLib，以及可选的 UniXNU EFI 启动能力。
+
+本仓库在 [1vivy/gbl-chainload](https://github.com/1vivy/gbl-chainload) 的基础上继续维护。固件使用仓库固定版本的 CLO edk2 核心，主机工具与补丁引擎使用 Rust。
+
+## 使用前必读
+
+> **这是实验性启动链工具，不是通用刷机包，也不保证防砖。** 使用不匹配的 ABL、vbmeta 或固件，可能导致启动失败、900E、无法进入 fastboot，甚至数据丢失。请先备份并确认恢复手段。
+
+- 首次验证优先使用 `fastboot stage` 临时加载，不要直接刷写启动链分区，也不要通过真正重新上锁来验证 fakelock。
+- 临时加载只表示不把该 EFI 写入分区，**不代表整个启动过程只读或无风险**。后续 ABL、系统及 fastboot 命令仍可能修改设备状态。
+- mode-1 / mode-2 不等同于真正重新上锁，也不保证通过所有应用或硬件证明检查。
+- patch12/13 必须在 GBL 已运行、且修改后的 ABL 被加载后才能生效，不能解决 GBL 运行之前的启动故障。
+- 静态补丁命中、主机测试通过，不等于对应机型已完成实机启动验证。
+
+本文按当前脚本与代码说明用法；历史实验、设备差异和逆向结论见 [项目文档](docs/project/README.md)。版本号以 [VERSION](VERSION) 为准。
+
+## 工作原理与适用范围
+
+正常 Android 启动路径：
+
+```text
+设备 UEFI / GBL 加载入口
+  └─ gbl-chainload EFI + GBLP1 载荷
+       ├─ 优先使用载荷内已打补丁的缓存 ABL
+       ├─ 缓存不可用时，尝试读取活动槽 ABL 并动态打补丁
+       ├─ 根据载荷 manifest 安装协议拦截
+       └─ 交接给修改后的 ABL → Android
+```
+
+ABL 提取、必要补丁或交接失败时，程序会尝试返回 GBL FastbootLib 作为恢复入口。这不是对所有故障都能恢复的承诺。
+
+项目主要面向 OnePlus / Oppo 等 Oplus 设备。当前 ABL 测试池包含一加 15（infiniti）、一加 15T（fairlady）、一加 Ace 6T（macan）及部分小米 / Redmi 样本，共 13 份去重镜像。**这是补丁回归覆盖范围，不是通用兼容机型名单**；还需要设备本身具有可用的 GBL / EFISP 加载入口。
+
+样本来源、版本证据和测试用途见 [测试镜像说明](tests/images/README.md)。不要把测试池内其他机型的 ABL 用于自己的设备。
+
+## 运行模式
+
+**同一个基础 EFI 支持所有模式**。mode 由拼接时写入 GBLP1 的 manifest 决定，不再为每个 mode 单独编译固件。
+
+| 模式 | 行为 |
+| --- | --- |
+| mode-0 | 不启用 fakelock 或 profile-spoof；仍保留通用保护策略及打包时选择的 ABL 补丁。 |
+| mode-1 | 协议层临时 fakelock，向相关接口提供锁定视图；抑制相关锁态持久化路径，避免把伪装状态提交到 RPMB。 |
+| mode-2 | 面向自定义 ROM，在 QSEE / SPSS 边界修改相关 TA 请求载荷；通过 vbmeta 派生的 profile 提供对应数据，ABL 内部仍保持真实解锁状态。 |
+
+mode-0 不是“完全无修改”，mode-1 / mode-2 也不是对任意混合固件组合的兼容保证。更换 ROM 或 OTA 后，应重新检查 ABL、vbmeta 和 mode-2 profile 的对应关系。
+
+### 补丁与品牌选择
+
+模式选择和 OEM 选择互相独立：
+
+| 补丁 | 范围 | 作用 |
+| --- | --- | --- |
+| patch6 / patch10 | 通用补丁组 | 修改 ABL 的 fastboot 锁态限制及 libavb 校验结果处理路径。 |
+| patch11（含 11a / 11b / 11c） | 通用补丁组 | 向外传递 locked / green 状态，并在 verification-disabled vbmeta 下保留必要的 vbmeta 摘要参数。 |
+| patch7 | Oplus，主机打包时启用 | 跳过 ABL 的解锁警告画面及相应等待。 |
+| patch12 | Oplus | 保留 A/B 重试计数与切槽，定向绕过已分析的拒绝进入 fastboot、重置和死循环分支。 |
+| patch13 | Oplus | 让存储的 unbootable 标记不影响本次 ABL 的相关可启动性判断；不改 GPT 写入路径，也不保证清除磁盘上的标记。 |
+
+- 给 Oplus 设备打包时，使用 `--oem oplus` 启用 patch7/12/13。
+- 不指定 `--oem`，或使用 `--oem none`，主机工具完全跳过这三个补丁，而不是尝试后记为 `MISS`。
+- 小米 / Redmi 使用 `--oem none` 或省略该参数。`oneplus` 仅作为 `oplus` 的旧名称兼容保留。
+- 设备端从活动槽 ABL 动态回退时，只有同时检测到对应 Oplus 专有字符串，才启用 patch12/13；patch7 仍只在主机端应用。
+- patch12/13 保持可选且支持重复应用。mode-2 打包则会强制检查 patch11 的三个部分，任一未命中都会终止生成。
+
+## 从源码构建
+
+### Linux 本机构建
+
+需要 Git、Python 3、make、主机 C/C++ 编译环境、Rust / Cargo，以及提供 `aarch64-linux-gnu-gcc` 和对应 binutils 的 AArch64 GNU 交叉工具链。EDK2 BaseTools 的其他依赖可参考 [Dockerfile](docker/Dockerfile)。
+
+```bash
+git clone https://github.com/Osilvfe/gbl-chainload.git
+cd gbl-chainload
+git submodule update --init edk2
+rustup target add aarch64-unknown-none
+
+cargo build --release -p gbl
+scripts/build-native.sh
+```
+
+默认输出：
+
+- `target/release/gbl`：主机端多功能工具，包含 `unwrap`、`patch`、`pack`、`inspect`、`mode2`、`avb`、`commit` 子命令。
+- `dist/gbl-chainload-debug-gcc5.efi`：带调试日志的基础 EFI，**尚未拼接设备专用载荷**。
+
+需要关闭 GBL 调试输出时：
+
+```bash
+scripts/build-native.sh --release --output dist/gbl-chainload.efi
+```
+
+注意：本机构建脚本始终使用 EDK2 的 `RELEASE` 目标，默认的 debug 名称表示 `GBL_DEBUG=1`；`--release` 将其改为 `0`。不要仅凭文件名推断全部编译优化设置。不同工具链或日志配置的实机结果不能互相替代。
+
+`cargo` 负责 Rust 工具和静态库；最终 EFI 仍需要 EDK2 链接，不能只运行一次 `cargo build` 就得到完整固件。
+
+### Docker 构建
+
+已有 Docker 环境时，也可以使用统一构建入口：
+
+```bash
+scripts/build.sh --debug --no-recovery
+```
+
+该示例生成 `dist/gbl-chainload-debug.efi` 和 `dist/host/gbl`；去掉 `--no-recovery` 还会构建 Android recovery 端工具。`--auto`、`--debug`、`--verbose` 分别控制启动策略和日志输出，**没有 `--mode` 构建参数**。
+
+此脚本会清空 `Build/`。如果还要集成 UniXNU，请先构建 GBL，再构建 UniXNU，避免删除刚生成的组件。
+
+## 拼接设备专用 EFISP
+
+以下示例使用本机构建产物。请自行准备目标设备对应固件的 ABL 和用于派生 profile 的 vbmeta，不要跨机型复用。
+
+以 Oplus 的 mode-2 为例：
+
+```bash
+python3 scripts/efisp-package.py \
+  --bin-dir target/release \
+  --abl /path/to/stock_abl.img \
+  --mode 2 \
+  --oem oplus \
+  --stock-vbmeta /path/to/stock_vbmeta.img \
+  --efi dist/gbl-chainload-debug-gcc5.efi \
+  --out dist/efisp-payload/device-mode2-debug.efi
+
+target/release/gbl inspect dist/efisp-payload/device-mode2-debug.efi
+```
+
+- mode-0 / mode-1：将 `--mode` 改为 `0` / `1`，并移除 `--stock-vbmeta`；Oplus 仍需保留 `--oem oplus` 才会包含专属补丁。
+- mode-2 必须提供 `--stock-vbmeta`，并自动启用 `--require-patch11`。
+- `--mode` 是**拼接脚本**的参数，不是基础固件构建参数。
+- 脚本完成解包、补丁、profile 生成和拼接，**不会替你刷写设备**。
+- `inspect` 检查容器结构与完整性，不验证该镜像是否适配硬件；使用前还要确认最终文件没有超过目标 EFISP 分区容量。
+
+更多工具参数见 [主机工具文档](tools/README.md)。
+
+## 临时加载与两套 fastboot
+
+**GBL FastbootLib 与原厂 ABL fastboot 是两套实现。** 能列出 `fastboot devices` 并不表示当前处于 GBL；`adb reboot bootloader` 也不能作为进入 GBL FastbootLib 的通用方法。
+
+下面的临时加载流程要求设备**已经能够进入支持 `oem boot-efi` 的 GBL FastbootLib**。首次建立 GBL / EFISP 加载入口的方法取决于设备，不存在可直接套用到所有机型的刷写步骤。
+
+先查询正在运行的构建，再加载候选镜像：
+
+```bash
+fastboot getvar gbl-chainload_build
+fastboot stage dist/efisp-payload/device-mode2-debug.efi
+fastboot oem boot-efi
+```
+
+基础 EFI 的默认按键策略：
+
+| 构建策略 | 检测窗口超时 | 音量上键 |
+| --- | --- | --- |
+| 默认，不带 `--auto` | 继续加载修改后的 ABL，正常目标是 Android | 进入 GBL FastbootLib |
+| 带 `--auto` 的主机门控构建 | 留在 GBL FastbootLib 等待主机命令 | 立即继续加载修改后的 ABL |
+
+需要在新加载的候选镜像里继续操作 GBL fastboot 时，应按该镜像的策略进入 FastbootLib。`fastboot oem escape` 用于退出 GBL FastbootLib，继续走修改后的 ABL 路径。
+
+**stage 载荷不会自动保存到 EFISP。** 重启后仍从设备已安装的固件 / EFISP 启动，不应把重启后的结果当成候选 stage 镜像仍在运行。
+
+### 临时启动 boot.img
+
+在 GBL FastbootLib 中，普通命令保留 DTBO 处理路径：
+
+```bash
+fastboot boot /path/to/boot.img
+```
+
+需要跳过 DTBO 时，使用独立的设备端命令：
+
+```bash
+fastboot stage /path/to/boot.img
+fastboot oem boot-nodtbo
+```
+
+`boot-nodtbo` 不读取 DTBO 分区或叠加其 overlay，也不传递 `androidboot.dtbo_idx`；基础 DTB 仍由 boot / vendor_boot 路径取得，AVB 仍会执行。这不是任意内核镜像都能启动的保证。
+
+## 可选：集成 UniXNU
+
+集成对象是 UniXNU EFI 应用及 DarwinBoot EFI 驱动，复用 GBL 的同一套 CLO edk2 核心；不需要再嵌套加载一份 Mu 固件或 FD。
+
+从锁定版本的源码构建组件：
+
+```bash
+scripts/build-unixnu.sh
+```
+
+然后把两个组件一同拼接进 EFISP：
+
+```bash
+python3 scripts/efisp-package.py \
+  --bin-dir target/release \
+  --abl /path/to/stock_abl.img \
+  --mode 2 --oem oplus \
+  --stock-vbmeta /path/to/stock_vbmeta.img \
+  --efi dist/gbl-chainload-debug-gcc5.efi \
+  --unixnu-efi Build/unixnu/RELEASE/UniXNU.efi \
+  --unixnu-loader-efi Build/unixnu/RELEASE/DarwinBoot.efi \
+  --out dist/efisp-payload/device-unixnu-mode2-debug.efi
+```
+
+组件源码版本记录在 [unixnu-sources.json](scripts/unixnu-sources.json)，源码缓存和编译产物位于忽略的 `Build/unixnu/`。脚本不生成 XNU 内核或 FAT 载荷，仓库也不携带这项功能的预编译 EFI / 设备载荷。
+
+进入包含这些组件的 GBL FastbootLib 后：
+
+```bash
+fastboot stage /path/to/payload.fat
+fastboot oem boot-unixnu
+```
+
+`payload.fat` 应为原始 FAT 文件系统镜像，包含 `EFI/UniXNU/unixnu.toml` 及配置引用的启动文件。GBL 将它暴露为只读 RAM 磁盘，再启动嵌入的 UniXNU；**默认启动、按键和超时不会自动选择 UniXNU，Android 仍是正常默认目标**。
+
+fairlady 已有 Android 与 Darwin 启动反馈，但这不等于所有 Darwin 驱动或用户空间都已验证。实现细节与对应测试镜像记录见 [UniXNU 集成说明](docs/notes/unixnu-clo-r25.md)。
+
+## 日志与故障定位
+
+常用固件日志保存在 `logfs` 分区：
+
+- `GblTrace.txt`：逐阶段追加并立即刷新，用来定位交接前停在哪一步；每次 LogFs 初始化都会重建，大小上限 48 KiB。
+- `UefiLog1.txt`：平台 UEFI 日志。
+- `UefiLogSaved*.txt`：轮转保留的历史日志，需要结合构建信息和启动顺序区分。
+
+在已经取得 root 的 Android 中，确认实际分区路径和现有挂载情况后，可只读挂载并导出。若 `logfs` 已挂载，请使用已有挂载点，不要重复操作：
+
+```bash
+adb shell 'su -c "mkdir -p /data/local/tmp/gbl-logfs && mount -t vfat -o ro /dev/block/by-name/logfs /data/local/tmp/gbl-logfs"'
+adb pull /data/local/tmp/gbl-logfs ./gbl-logfs
+adb shell 'su -c "umount /data/local/tmp/gbl-logfs"'
+```
+
+尽快保存失败启动的日志，后续启动或再次初始化可能覆盖它。日志里的设备标识、分区信息等可能涉及隐私，公开前应检查。
+
+开发日志分级：`Print` 用于必须显示的提示或错误；`GBL_INFO` 用于补丁命中、拦截和启动阶段等语义事件；`VERBOSE` 用于高频原始跟踪，只有 verbose 构建保留。尽量先用调试构建收集必要日志，避免大量原始输出挤掉关键记录。
+
+## 开发与回归测试
+
+常用的定向检查：
+
+```bash
+cargo test -p patch-engine --features host
+bash tests/host/088_patch7_multi_abl.sh
+bash tests/host/097_patch11_multi_abl.sh
+bash tests/host/098_patch12_patch13_oem.sh
+```
+
+`098` 同时检查主机 OEM 选择、设备端品牌识别、patch12/13 的 6+3 处改写、重复应用及 GPT 写入位置不变。
+
+全量测试需要额外准备：部分 recovery 测试镜像通过 Git LFS 保存，需使用 `git lfs pull` 获取真实内容；部分 mode-2 parity 测试还依赖 `082_mode2_profile_parity.sh` 生成的 golden 文件和相应派生测试前置条件。缺少这些内容时，不要把 LFS 指针或缺失的测试产物当成有效镜像。
+
+主要目录：
+
+| 路径 | 内容 |
+| --- | --- |
+| `GblChainloadPkg/` | EFI 入口、启动流程、协议拦截及载荷处理 |
+| `crates/patch-engine/` | Rust 补丁引擎；通用补丁在 `abl_permissive/`，Oplus 补丁在 `oem/oplus/` |
+| `tools/gbl/` | 主机 / recovery 多功能工具 |
+| `edk2/` | 固定提交的 CLO edk2 派生子模块 |
+| `scripts/` | 构建、拼接及开发辅助脚本 |
+| `tests/images/` | 去重后的 ABL 等测试样本 |
+| `docs/project/` | 当前状态、逆向结论、决策及上游问题记录 |
+
+版本发布使用与 `VERSION` 一致的 `release-X.Y.Z` 标签，工作流构建对应提交并创建待审核草稿。日常开发使用 `main`。
+
+许可见 [LICENSE](LICENSE)；第三方组件遵循各自的许可。
