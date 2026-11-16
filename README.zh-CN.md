@@ -67,6 +67,20 @@ mode-0 不是“完全无修改”，mode-1 / mode-2 也不是对任意混合固
 - 设备端从活动槽 ABL 动态回退时，只有同时检测到对应 Oplus 专有字符串，才启用 patch12/13；patch7 仍只在主机端应用。
 - patch12/13 保持可选且支持重复应用。mode-2 打包则会强制检查 patch11 的三个部分，任一未命中都会终止生成。
 
+### 通用保护与 mode-1 持久化策略
+
+所有模式都安装通用保护：抑制已处理的三类 TZ soft-fuse / rollback-update SCM 调用，并吞掉已匹配的 `oplusreserve1` / `opporeserve1` 分区写入，包括 token 清零写入。这些是针对特定接口和分区的拦截，不是全局只读策略，也不保证降级固件安全。
+
+mode-1 下，VB `WRITE_CONFIG` 是**先修正为 unlocked，再转发**，并非简单丢弃。VB device reset、OplusSec `write_rpmb_boot_info`（`0x0A`）和 KeyMaster `WRITE_KM_DEVICE_STATE`（`0x203`）则在对应拦截路径被抑制，目标是让 fakelock 保持临时状态，而非把伪装的锁定记录持久化。该策略不是按 SoC 设置的白名单；设备观测和仍存在的不确定性见 [逆向结论](docs/project/re-findings.md)。
+
+不要为了验证这些拦截而重新上锁或切槽。已有日志中的 `write-swallow`、`token-zero-write`、`healed->unlocked`、`WRITE_KM_DEVICE_STATE` 可作为检查线索，但单独出现这些事件不构成完整的安全证明。
+
+### patch11c 与 vbmeta 交接一致性
+
+原厂 libavb 在 verification-disabled 路径可能省略 `androidboot.vbmeta.{hash_alg,size,digest}`，依赖用户空间看到 orange 状态。patch11a/11b 改为报告 locked / green 后，缺少这些参数可能导致第一阶段挂载失败。patch11c 移除该禁用分支，让正常交接路径继续提供这些参数。
+
+`--experimental-vbmeta-cmdline` 已是废弃的空操作，因为 11c 已并入 patch11；mode-2 拼接自动使用 `--require-patch11`。这不能让不匹配的原厂 / 自定义 AVB 链变得有效；11c 还会运行原禁用路径跳过的 managed-verity helper。应验证完整镜像组合，不能把补丁命中视为适配保证。
+
 ## 从源码构建
 
 ### Linux 本机构建
@@ -100,15 +114,17 @@ scripts/build-native.sh --release --output dist/gbl-chainload.efi
 
 ### Docker 构建
 
+Docker 是用于统一 CI 和跨平台开发工具链的可选环境，不是运行固件的依赖。已经配好工具链的 Linux 主机可以直接使用上面的本机构建流程；容器本身不保证字节级可复现，也不能自动解决设备启动问题。
+
 已有 Docker 环境时，也可以使用统一构建入口：
 
 ```bash
 scripts/build.sh --debug --no-recovery
 ```
 
-该示例生成 `dist/gbl-chainload-debug.efi` 和 `dist/host/gbl`；去掉 `--no-recovery` 还会构建 Android recovery 端工具。`--auto`、`--debug`、`--verbose` 分别控制启动策略和日志输出，**没有 `--mode` 构建参数**。
+该示例生成 `dist/gbl-chainload-debug.efi` 和 `dist/host/gbl`；去掉 `--no-recovery` 还会构建 Android recovery 端工具。固件和 recovery 在容器内构建，主机工具阶段仍需要本机 Cargo，也可以使用 `--no-host` 跳过。`--auto`、`--debug`、`--verbose` 分别控制启动策略和日志输出，**没有 `--mode` 构建参数**。
 
-此脚本会清空 `Build/`。如果还要集成 UniXNU，请先构建 GBL，再构建 UniXNU，避免删除刚生成的组件。
+此脚本会清空 `Build/`。如果还要集成 UniXNU，请先构建 GBL，再构建 UniXNU，避免删除刚生成的组件。使用 Docker 产物套用后面的拼接示例时，应把主机工具路径改为 `--bin-dir dist/host`，基础 EFI 改为 `--efi dist/gbl-chainload-debug.efi`，并通过 `dist/host/gbl` 执行 `inspect`。
 
 ## 拼接设备专用 EFISP
 
@@ -162,6 +178,27 @@ fastboot oem boot-efi
 
 **stage 载荷不会自动保存到 EFISP。** 重启后仍从设备已安装的固件 / EFISP 启动，不应把重启后的结果当成候选 stage 镜像仍在运行。
 
+### 诊断查询
+
+GBL 提供构建和日志配置元数据，以及轻量级 vbmeta 诊断：
+
+```bash
+fastboot getvar gbl-chainload_version
+fastboot getvar gbl-chainload_date
+fastboot getvar gbl-chainload_auto
+fastboot getvar gbl-chainload_debug
+fastboot getvar gbl-chainload_verbose
+fastboot getvar unlocked
+fastboot getvar oem-unlock-allowed
+fastboot getvar vbmeta:capabilities
+fastboot getvar vbmeta:slot
+fastboot getvar vbmeta:warning
+fastboot getvar vbmeta:boot:status
+fastboot getvar vbmeta:boot:descriptor-type
+```
+
+按分区查询的格式为 `vbmeta:<partition>:status` / `vbmeta:<partition>:descriptor-type`。这些结果和菜单警告只提供诊断线索，不是完整的 AVB 或证明验证；原厂 ABL fastboot 不一定暴露这些变量。已知菜单警告及安装器限制见 [上游问题记录](docs/project/upstream-issues.md)；本文的试运行流程有意不包含修改锁态或写分区的命令。
+
 ### 临时启动 boot.img
 
 在 GBL FastbootLib 中，普通命令保留 DTBO 处理路径：
@@ -178,6 +215,12 @@ fastboot oem boot-nodtbo
 ```
 
 `boot-nodtbo` 不读取 DTBO 分区或叠加其 overlay，也不传递 `androidboot.dtbo_idx`；基础 DTB 仍由 boot / vendor_boot 路径取得，AVB 仍会执行。这不是任意内核镜像都能启动的保证。
+
+### 当前启动路径修复与历史工具
+
+当前源码构建已跳过 GBL 临时启动路径的 verified-boot 警告 UI，通过 `BoardInit()` 初始化平台信息而非硬编码 fairlady ID，并包含 LibUfdt overlay 分配器的状态重置与释放修复。GBL 自身的启动路径与修改后的 ABL 路径相互独立：跳过警告 UI 不等于关闭 AVB，正常启动 Android 也不能证明所有 `fastboot boot` 镜像都能工作。
+
+旧的 [二进制补丁工具](scripts/gbl-fastboot-boot-fix.py) 面向特定历史 EFI 布局，不是当前构建后的必需步骤，不应盲目用于新固件。历史偏移、观测和诊断轨迹保留在 [逆向结论](docs/project/re-findings.md) 中。
 
 ## 可选：集成 UniXNU
 
@@ -203,7 +246,7 @@ python3 scripts/efisp-package.py \
   --out dist/efisp-payload/device-unixnu-mode2-debug.efi
 ```
 
-组件源码版本记录在 [unixnu-sources.json](scripts/unixnu-sources.json)，源码缓存和编译产物位于忽略的 `Build/unixnu/`。脚本不生成 XNU 内核或 FAT 载荷，仓库也不携带这项功能的预编译 EFI / 设备载荷。
+组件源码版本记录在 [unixnu-sources.json](scripts/unixnu-sources.json)，源码缓存和编译产物位于忽略的 `Build/unixnu/`。脚本不生成 XNU 内核或 FAT 载荷，仓库也不携带这项功能的预编译 EFI / 设备载荷。`scripts/build-unixnu.sh --debug` 选择 EDK2 的 `DEBUG` 目标并输出到 `Build/unixnu/DEBUG/`，拼接时需相应修改两个组件路径。
 
 进入包含这些组件的 GBL FastbootLib 后：
 
@@ -232,9 +275,23 @@ adb pull /data/local/tmp/gbl-logfs ./gbl-logfs
 adb shell 'su -c "umount /data/local/tmp/gbl-logfs"'
 ```
 
-尽快保存失败启动的日志，后续启动或再次初始化可能覆盖它。日志里的设备标识、分区信息等可能涉及隐私，公开前应检查。
+尽快保存失败启动的日志，后续启动或再次初始化可能覆盖它。日志里的设备标识、分区信息等可能涉及隐私，公开前应检查。标准 UEFI 日志受平台缓冲和刷新时机影响，过早停滞可能没有最终记录，因此需要 `GblTrace.txt` 补充定位。
 
-开发日志分级：`Print` 用于必须显示的提示或错误；`GBL_INFO` 用于补丁命中、拦截和启动阶段等语义事件；`VERBOSE` 用于高频原始跟踪，只有 verbose 构建保留。尽量先用调试构建收集必要日志，避免大量原始输出挤掉关键记录。
+### 开发日志分级
+
+使用 [GblLog.h](GblChainloadPkg/Include/Library/GblLog.h) 提供的接口：
+
+| 接口 | 配置 | 用途与输出 |
+| --- | --- | --- |
+| `Print(L"...")` | 始终启用 | 必须让用户看到的提示或致命错误，显示到屏幕。 |
+| `GBL_INFO("...")` | `GBL_DEBUG=0` | 通过平台状态码日志路径记录语义事件，通常不输出到屏幕。 |
+| `GBL_INFO("...")` | `GBL_DEBUG=1` | 通过 `AsciiPrint` 输出相同语义事件，并显示到屏幕。 |
+| `VERBOSE("...")` | `GBL_VERBOSE=0` | 编译时移除。 |
+| `VERBOSE("...")` | `GBL_VERBOSE=1` | 通过 `AsciiPrint` 输出高频原始跟踪。 |
+
+修改、吞掉操作、相关拦截命令的输出以及启动阶段应使用 `GBL_INFO`；透传查询、原始转储和扫描循环使用 `VERBOSE`，不要把正确性证据只放在 verbose 日志中。两层都应避免没有必要的协议内部封送跟踪；无条件错误和警告路径保留 `DEBUG_ERROR` / `DEBUG_WARN`。
+
+`GBL_INFO` / `VERBOSE` 使用不带 `L` 前缀的 CHAR8 格式字符串。ASCII 字符串参数使用 `%a`，需要时显式转换 CHAR16 字符串。能否最终写入 UEFI 日志仍取决于平台支持、日志掩码与刷新时机，避免大量原始输出挤掉关键记录。
 
 ## 开发与回归测试
 
@@ -249,13 +306,14 @@ bash tests/host/098_patch12_patch13_oem.sh
 
 `098` 同时检查主机 OEM 选择、设备端品牌识别、patch12/13 的 6+3 处改写、重复应用及 GPT 写入位置不变。
 
-全量测试需要额外准备：部分 recovery 测试镜像通过 Git LFS 保存，需使用 `git lfs pull` 获取真实内容；部分 mode-2 parity 测试还依赖 `082_mode2_profile_parity.sh` 生成的 golden 文件和相应派生测试前置条件。缺少这些内容时，不要把 LFS 指针或缺失的测试产物当成有效镜像。
+全量测试需要额外准备：部分 recovery 测试镜像通过 Git LFS 保存，需使用 `git lfs pull` 获取真实内容；部分 mode-2 parity 测试还依赖 `082_mode2_profile_parity.sh` 生成的 golden 文件及包括 `avbtool` 在内的派生测试前置条件。应先取得真实样本并补齐参考文件再判断全量测试结果，不能把 LFS 指针当作镜像，也不能仅凭前置文件缺失就认定补丁回归。
 
-主要目录：
+### 仓库目录
 
 | 路径 | 内容 |
 | --- | --- |
 | `GblChainloadPkg/` | EFI 入口、启动流程、协议拦截及载荷处理 |
+| `GblChainloadPkg/Library/ProtocolHookLib/` | 通用 `UniversalBaseline.c`、mode-1 `FakelockOverlay.c`、mode-2 `ProfileOverlay.c` |
 | `crates/patch-engine/` | Rust 补丁引擎；通用补丁在 `abl_permissive/`，Oplus 补丁在 `oem/oplus/` |
 | `tools/gbl/` | 主机 / recovery 多功能工具 |
 | `edk2/` | 固定提交的 CLO edk2 派生子模块 |
@@ -263,6 +321,10 @@ bash tests/host/098_patch12_patch13_oem.sh
 | `tests/images/` | 去重后的 ABL 等测试样本 |
 | `docs/project/` | 当前状态、逆向结论、决策及上游问题记录 |
 
-版本发布使用与 `VERSION` 一致的 `release-X.Y.Z` 标签，工作流构建对应提交并创建待审核草稿。日常开发使用 `main`。
+### 发布与文档维护
+
+日常开发及 CI 使用 `main`。版本发布使用与 `VERSION` 一致的已有 `release-X.Y.Z` 标签，工作流构建对应提交并创建待审核草稿；历史 `v...` 标签不会触发当前发布流程。
+
+中英文 README 使用相同的章节顺序和可执行示例；修改行为说明时应同步更新两版，详细历史实验保留在项目文档中，不再作为当前安装步骤呈现。
 
 许可见 [LICENSE](LICENSE)；第三方组件遵循各自的许可。
