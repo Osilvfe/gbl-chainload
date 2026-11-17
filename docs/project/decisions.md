@@ -1,13 +1,23 @@
-# Decisions
+# Project decisions
+
+The sections below retain decisions from earlier development stages.
+Some implementation status and tool names are historical; use the root
+README and current source for supported commands and behavior.
 
 ## Docs consolidation
 
-Decision: `docs/project/` is the single source of truth for project documentation, RE findings, and milestone planning.
+Decision: [docs/README.md](../README.md) is the documentation entry point.
+Separate research, optional integrations, project records and historical
+archives rather than mixing all four under a project-notes directory.
 
 Consequences:
 
-- Old `docs/re/`, `docs/superpowers/plans/`, `docs/superpowers/specs/`, and `.re-notes/sessions/` content is distilled here and then removed. `.re-notes/README.md` remains only as a pointer into `docs/project/`.
-- Future agent-orchestrated work should update `docs/project/current-state.md`, `docs/project/next-milestone.md`, `docs/project/re-findings.md`, or this file instead of creating isolated plan piles.
+- Technical findings live in `docs/research/`; dated plans, specifications,
+  project snapshots and validation evidence live in `docs/archive/`.
+- Preserve historical evidence, but do not present superseded plans as
+  current build or installation instructions.
+- Firmware samples live in `tests/fixtures/`; private inputs belong in
+  ignored `local/firmware/` rather than a second root-level image pool.
 
 ## Recovery fix path
 
@@ -54,13 +64,13 @@ Implementation:
 
 Rationale: on-device generation means the cached ABL is always built from the OTA's actual `abl_<inactive>` bytes, with no host build step required after an OTA. Non-HLOS writes remain user-driven (TWRP ZIP swipe), keeping the agent workflow safe.
 
-Status: the EFI runtime (`GblPayloadLib`, `BootFlow.c`) and the cross-compiled toolchain (`tools/gbl-pack`, `tools/gbl-commit`, the `fv-unwrap`/`abl-patcher` aarch64 targets) ship in the on-device-payload-insertion PR. The installer ZIP that orchestrates steps 1–3 of the user flow above is descoped to a follow-up — the ZIP-methodology line of work; see `docs/project/zip-methodology.md`. Until it lands, the flow is driven manually per `docs/project/recovery-install-validation.md`.
+Status: the EFI runtime (`GblPayloadLib`, `BootFlow.c`) and the cross-compiled toolchain (`tools/gbl-pack`, `tools/gbl-commit`, the `fv-unwrap`/`abl-patcher` aarch64 targets) ship in the on-device-payload-insertion PR. The installer ZIP that orchestrates steps 1–3 of the user flow above is descoped to a follow-up — the ZIP-methodology line of work; see `docs/research/recovery-installer.md`. Until it lands, the flow is driven manually per `docs/archive/project/recovery-install-validation.md`.
 
 ## Cache-ABL container format
 
 Decision: GBLP1 v1 — a versioned TLV container appended to the installed gbl-chainload PE on EFISP.
 
-Format reference: `docs/superpowers/specs/2026-05-15-on-device-payload-insertion-design.md` (GBLP1 v1 byte layout, type codes, runtime validation order, failure-category log lines).
+Format reference: `docs/archive/specs/2026-05-15-on-device-payload-insertion-design.md` (GBLP1 v1 byte layout, type codes, runtime validation order, failure-category log lines).
 
 Key properties:
 

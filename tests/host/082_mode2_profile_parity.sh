@@ -65,7 +65,7 @@ fi
 
 # ---- derive parity (SKIP-guarded if fixture or avbtool absent) ----
 
-VBMETA="tests/images/vbmeta-infiniti-IN-16.0.7.201.img"
+VBMETA="tests/fixtures/avb/vbmeta-infiniti-IN-16.0.7.201.img"
 AVBTOOL="${AVBTOOL:-$HOME/avbtool.py}"
 
 if [ -f "$VBMETA" ] && [ -f "$AVBTOOL" ]; then

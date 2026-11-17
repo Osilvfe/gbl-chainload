@@ -16,7 +16,7 @@ This repository continues development from [1vivy/gbl-chainload](https://github.
 - patch12/13 can take effect only after GBL runs and loads the patched ABL. They cannot repair failures before GBL starts.
 - Static patch matches and passing host tests do not constitute hardware boot validation.
 
-This README describes the current scripts and code. Historical experiments, device differences, and reverse-engineering findings live in the [project notes](docs/project/README.md). [VERSION](VERSION) is the version source of truth.
+This README describes the current scripts and code. The [documentation index](docs/README.md) separates research, integrations, project records and historical archives. [VERSION](VERSION) is the version source of truth.
 
 ## Boot Flow and Compatibility
 
@@ -35,7 +35,7 @@ When ABL extraction, required patching, or handoff fails, the program attempts t
 
 The project primarily targets OnePlus / Oppo and other Oplus devices. The current ABL test pool has 13 deduplicated images covering OnePlus 15 (infiniti), OnePlus 15T (fairlady), OnePlus Ace 6T (macan), and selected Xiaomi / Redmi builds. **This is patch-regression coverage, not a universal supported-device list**; a usable GBL / EFISP entry is also required on the device.
 
-See the [test-image notes](tests/images/README.md) for provenance, version evidence, and test usage. Do not use another device's fixture ABL on your own hardware.
+See the [test-image notes](tests/fixtures/README.md) for provenance, version evidence, and test usage. Do not use another device's fixture ABL on your own hardware.
 
 ## Operating Modes
 
@@ -74,7 +74,7 @@ Mode selection and OEM selection are independent:
 
 All modes install the common preservation baseline: suppress the three handled TZ soft-fuse / rollback-update SCM calls and swallow writes to matched `oplusreserve1` / `opporeserve1` partitions, including token-zeroing writes. These are targeted hooks, not a general read-only policy or a guarantee that downgrading firmware is safe.
 
-Under mode-1, VB `WRITE_CONFIG` is **healed toward unlocked and forwarded**, not simply dropped. VB device reset, OplusSec `write_rpmb_boot_info` (`0x0A`), and KeyMaster `WRITE_KM_DEVICE_STATE` (`0x203`) are suppressed on the corresponding intercepted paths. The intent is to keep fakelock temporary rather than persist a spoofed locked record. This policy is not a per-SoC whitelist; device observations and remaining uncertainties are recorded in the [reverse-engineering findings](docs/project/re-findings.md).
+Under mode-1, VB `WRITE_CONFIG` is **healed toward unlocked and forwarded**, not simply dropped. VB device reset, OplusSec `write_rpmb_boot_info` (`0x0A`), and KeyMaster `WRITE_KM_DEVICE_STATE` (`0x203`) are suppressed on the corresponding intercepted paths. The intent is to keep fakelock temporary rather than persist a spoofed locked record. This policy is not a per-SoC whitelist; device observations and remaining uncertainties are recorded in the [reverse-engineering findings](docs/research/findings.md).
 
 Do not relock or switch slots merely to test these hooks. Existing captures can be checked for `write-swallow`, `token-zero-write`, `healed->unlocked`, and `WRITE_KM_DEVICE_STATE` events; their presence alone is not a complete safety proof.
 
@@ -229,7 +229,7 @@ fastboot oem boot-nodtbo
 
 Current source builds already skip the verified-boot warning UI on GBL's temporary boot path, initialize platform data through `BoardInit()` instead of hard-coded fairlady IDs, and carry the LibUfdt overlay allocator reset/free fixes. GBL's own boot path is separate from the patched ABL path: skipping its warning UI is not disabling AVB, and a normally booting Android installation does not prove that every `fastboot boot` image will work.
 
-The older [binary-patch helper](scripts/gbl-fastboot-boot-fix.py) targets specific historical EFI layouts. It is not a required post-build step and must not be applied blindly to current firmware. Historical offsets, observations, and diagnostic traces remain in the [reverse-engineering findings](docs/project/re-findings.md).
+The older [binary-patch helper](scripts/gbl-fastboot-boot-fix.py) targets specific historical EFI layouts. It is not a required post-build step and must not be applied blindly to current firmware. Historical offsets, observations, and diagnostic traces remain in the [reverse-engineering findings](docs/research/findings.md).
 
 ## Optional UniXNU Integration
 
@@ -266,7 +266,7 @@ fastboot oem boot-unixnu
 
 `payload.fat` must be a raw FAT filesystem image containing `EFI/UniXNU/unixnu.toml` and the boot files referenced by that configuration. GBL exposes it as a read-only RAM disk and starts the embedded UniXNU. **Normal startup, key handling, and timeout do not automatically select UniXNU; Android remains the normal default target.**
 
-Android and Darwin startup have been reported on fairlady; this is not validation of every Darwin driver or userspace component. See the [UniXNU integration notes](docs/notes/unixnu-clo-r25.md) for implementation details and the tested image's provenance.
+Android and Darwin startup have been reported on fairlady; this is not validation of every Darwin driver or userspace component. See the [UniXNU integration notes](docs/integrations/unixnu-clo-r25.md) for implementation details and the tested image's provenance.
 
 ## Logging and Troubleshooting
 
@@ -314,6 +314,7 @@ bash tests/host/098_patch12_patch13_oem.sh
 bash tests/host/099_mode2_runtime.sh
 bash tests/host/100_native_build.sh
 bash tests/host/101_build_defines.sh
+bash tests/host/102_repository_layout.sh
 ```
 
 `098` checks all fixtures in mode-0 / mode-1 / mode-2 on both host and firmware engine paths: patch11 is absent in modes 0/1 and present in mode 2, while OEM selection, vendor detection, the 6+3 patch12/13 instruction rewrites, idempotency, and unchanged GPT write sites are also verified.
@@ -324,20 +325,27 @@ bash tests/host/101_build_defines.sh
 
 `101` verifies string macro quoting through both the shell and EDK2-normalized GCC response files, including the long-command path used by clean CI builds.
 
+`102` checks the documentation indexes, archived task paths, fixture categories, Git LFS rules and private-input ignore policy after directory reorganizations.
+
 Full-suite prerequisites include real Git LFS recovery images, fetched with `git lfs pull`, and mode-2 parity golden files generated by `082_mode2_profile_parity.sh` with its derive-test prerequisites, including `avbtool`. Fetch the real fixtures and prepare those references before interpreting full-suite results: an LFS pointer is not an image, and missing prerequisite files alone do not establish a patch regression.
 
 ### Repository Layout
 
 | Path | Contents |
 | --- | --- |
+| `AGENTS.md` | Tool-independent contributor guidance and device-safety rules |
 | `GblChainloadPkg/` | EFI entry, boot flow, protocol hooks, and payload handling |
 | `GblChainloadPkg/Library/ProtocolHookLib/` | Common `UniversalBaseline.c`, mode-1 `FakelockOverlay.c`, and mode-2 `ProfileOverlay.c` |
 | `crates/patch-engine/` | Rust patch engine; always-on cross-OEM patches in `abl_permissive/`, patch11 in `mode2/`, Oplus patches in `oem/oplus/` |
 | `tools/gbl/` | Host / recovery multicall tool |
 | `edk2/` | CLO-derived edk2 submodule pinned to a specific commit |
 | `scripts/` | Build, packaging, and development helpers |
-| `tests/images/` | Deduplicated ABL and other test fixtures |
-| `docs/project/` | Project state, reverse-engineering findings, decisions, and upstream issue notes |
+| `tests/` | Regression suites and categorized `fixtures/{abl,pe,avb,recovery}/` inputs |
+| `docs/` | Documentation index, `research/`, `integrations/`, `project/` and historical `archive/` |
+| `local/` | Ignored private firmware inputs and scratch notes; only its README is tracked |
+| `Build/`, `target/`, `dist/`, `logs/` | Ignored build caches, outputs and existing device logs |
+
+See [docs/README.md](docs/README.md) and [tests/README.md](tests/README.md) for the directory map. Firmware source, build entry points and output paths are unchanged; the `zip/` installer submodule is retained for a separate migration.
 
 ### Releases and Documentation
 

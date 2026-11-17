@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 087_mode2_profile_regression.sh — schema regression for the mode2-profile
-# derive command on tests/images/vbmeta-infiniti-IN-16.0.7.201.img. Asserts
+# derive command on tests/fixtures/avb/vbmeta-infiniti-IN-16.0.7.201.img. Asserts
 # the derived TOML carries the expected field values (version, lock state,
 # system_version, color, spl comment). Replaces the prior byte-identical
 # golden assertion now that the Rust impl is authoritative — field-level
@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-FIXTURE_REL="tests/images/vbmeta-infiniti-IN-16.0.7.201.img"
+FIXTURE_REL="tests/fixtures/avb/vbmeta-infiniti-IN-16.0.7.201.img"
 NEW="tests/host/.last/087/derived.toml"
 
 if [[ ! -f "$FIXTURE_REL" ]]; then

@@ -6,7 +6,7 @@
 # concatenate onto dist/mode-2-debug-verbose.efi -> dist/mode-2-test.efi
 #
 # Usage: scripts/make-mode2-test-overlay.sh [vbmeta.img]
-#   vbmeta.img defaults to images/vbmeta-infiniti-IN-16.0.7.201.img
+#   vbmeta.img defaults to tests/fixtures/avb/vbmeta-infiniti-IN-16.0.7.201.img
 #
 # Test on device with:
 #   fastboot stage dist/mode-2-test.efi
@@ -14,7 +14,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VBMETA="${1:-images/vbmeta-infiniti-IN-16.0.7.201.img}"
+VBMETA="${1:-tests/fixtures/avb/vbmeta-infiniti-IN-16.0.7.201.img}"
 AVBTOOL="${AVBTOOL:-$HOME/avbtool.py}"
 OUT=dist/mode-2-test-build
 M2P=scripts/mode2-profile.py

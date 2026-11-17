@@ -15,8 +15,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-PE=tests/images/pe/infiniti-EU-16.0.5.703.efi
-[ -f "$PE" ] || { echo "SKIP: $PE missing — run scripts/extract-pe-from-fv.sh first" >&2; exit 0; }
+PE=tests/fixtures/pe/infiniti-EU-16.0.5.703.efi
+[ -f "$PE" ] || { echo "SKIP: $PE missing — restore the tracked PE fixture" >&2; exit 0; }
 
 cargo build --release --quiet -p gbl
 PATH="$PWD/target/release:$PATH"; export PATH

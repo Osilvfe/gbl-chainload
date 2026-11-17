@@ -585,7 +585,7 @@ HookedSendCmd (
      issues it on the sm8850 family — observed on fairlady as well as macan, so
      the guard is deliberately not gated per device. (That 0x203 persists to
      RPMB is inferred from the command name plus the reported brick, not yet
-     confirmed by disassembly; see docs/project/re-findings.md "Device: macan".)
+     confirmed by disassembly; see docs/research/findings.md "Device: macan".)
      Gated to the keymaster TA handle and to fakelock builds only, so mode-0
      (honest) and mode-2 (profile-spoof, no fakelock) are untouched. */
   if (gManifest.WantFakelockHook &&

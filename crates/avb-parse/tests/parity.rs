@@ -2,9 +2,9 @@
 //! tracked real-device fixtures.
 //!
 //! Inputs:
-//!   - `tests/images/vbmeta-infiniti-IN-16.0.7.201.img` — stock OEM
+//!   - `tests/fixtures/avb/vbmeta-infiniti-IN-16.0.7.201.img` — stock OEM
 //!     vbmeta partition dump from infiniti (OnePlus 15).
-//!   - `tests/images/grafted-recovery.img` — post-graft recovery
+//!   - `tests/fixtures/recovery/grafted-recovery.img` — post-graft recovery
 //!     partition with an embedded vbmeta blob (footer'd image).
 //!
 //! Goldens for the host C-tool surface (074 / 091 list output, 090
@@ -41,7 +41,7 @@ fn read_fixture(rel: &str) -> Option<Vec<u8>> {
 
 #[test]
 fn infiniti_vbmeta_parses() {
-    let bytes = match read_fixture("tests/images/vbmeta-infiniti-IN-16.0.7.201.img") {
+    let bytes = match read_fixture("tests/fixtures/avb/vbmeta-infiniti-IN-16.0.7.201.img") {
         Some(b) => b,
         None => {
             eprintln!("SKIP: infiniti vbmeta fixture missing");
@@ -62,7 +62,7 @@ fn infiniti_vbmeta_parses() {
 
 #[test]
 fn infiniti_vbmeta_descriptor_set() {
-    let bytes = match read_fixture("tests/images/vbmeta-infiniti-IN-16.0.7.201.img") {
+    let bytes = match read_fixture("tests/fixtures/avb/vbmeta-infiniti-IN-16.0.7.201.img") {
         Some(b) => b,
         None => {
             eprintln!("SKIP: infiniti vbmeta fixture missing");
@@ -109,7 +109,7 @@ fn infiniti_vbmeta_descriptor_set() {
 fn infiniti_vbmeta_chain_verdict_unkeyed() {
     // Chain verdict on the vbmeta blob with no chain key passed — any
     // parseable vbmeta should land in `Ok`.
-    let bytes = match read_fixture("tests/images/vbmeta-infiniti-IN-16.0.7.201.img") {
+    let bytes = match read_fixture("tests/fixtures/avb/vbmeta-infiniti-IN-16.0.7.201.img") {
         Some(b) => b,
         None => {
             eprintln!("SKIP: infiniti vbmeta fixture missing");
@@ -123,7 +123,7 @@ fn infiniti_vbmeta_chain_verdict_unkeyed() {
 
 #[test]
 fn grafted_recovery_footer() {
-    let bytes = match read_fixture("tests/images/grafted-recovery.img") {
+    let bytes = match read_fixture("tests/fixtures/recovery/grafted-recovery.img") {
         Some(b) => b,
         None => {
             eprintln!("SKIP: grafted-recovery fixture missing");
@@ -140,7 +140,7 @@ fn grafted_recovery_footer() {
 
 #[test]
 fn grafted_recovery_embedded_vbmeta_descriptors() {
-    let bytes = match read_fixture("tests/images/grafted-recovery.img") {
+    let bytes = match read_fixture("tests/fixtures/recovery/grafted-recovery.img") {
         Some(b) => b,
         None => {
             eprintln!("SKIP: grafted-recovery fixture missing");
@@ -178,7 +178,7 @@ fn grafted_recovery_embedded_vbmeta_descriptors() {
 
 #[test]
 fn grafted_recovery_footer_from_tail() {
-    let bytes = match read_fixture("tests/images/grafted-recovery.img") {
+    let bytes = match read_fixture("tests/fixtures/recovery/grafted-recovery.img") {
         Some(b) => b,
         None => {
             eprintln!("SKIP: grafted-recovery fixture missing");

@@ -51,7 +51,7 @@
 //! failure with `--require-patch11`. Multiple table candidates degrade to
 //! `AMBIGUOUS`.
 //!
-//! See `docs/project/re-findings.md` § patch11.
+//! See `docs/research/findings.md` § patch11.
 
 use crate::internal::arm64_decode::{decode_adrp_add_regs, find_adrp_add_targeting};
 use crate::internal::encode::{read_instr_u32, write_instr_u32};

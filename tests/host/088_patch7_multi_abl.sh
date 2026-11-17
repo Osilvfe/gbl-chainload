@@ -22,7 +22,7 @@
 # patch7 reports OK again (idempotency) and the test still validates patch7
 # anchoring, not the full mandatory contract.
 #
-# Uses the tracked tests/images/ ABL fixtures, so it runs in CI (not SKIP).
+# Uses the tracked tests/fixtures/ ABL fixtures, so it runs in CI (not SKIP).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -36,11 +36,11 @@ mkdir -p "$OUT"
 
 # oplus-family ABLs: patch7 must apply.  Add new dumps here as they land.
 shopt -s nullglob
-OPLUS_ABLS=(tests/images/op*-abl.img)
+OPLUS_ABLS=(tests/fixtures/abl/op*-abl.img)
 # non-oplus ABL: patch7 must cleanly miss (no false positive).
 NONOPLUS_ABLS=(
-  tests/images/xi*-abl.img
-  tests/images/redmi*-abl.img
+  tests/fixtures/abl/xi*-abl.img
+  tests/fixtures/abl/redmi*-abl.img
 )
 
 ran=0

@@ -5,10 +5,9 @@ helpers:
 	$(MAKE) -C helpers
 
 fixtures: helpers
-	# Real PE fixtures are produced by scripts/extract-pe-from-fv.sh; we
-	# don't regenerate them here. Synthetic fixtures land in tasks 1.13/1.15.
+	# Curated PE inputs live in ../fixtures/pe/ and are not regenerated here.
+	# Generated test data belongs in .last/ rather than a second fixture pool.
 
 clean:
 	$(MAKE) -C helpers clean
-	rm -rf .last fixtures/poisoned-pe.efi fixtures/golden-payload.bin \
-	       fixtures/synthetic-efisp.img
+	rm -rf .last

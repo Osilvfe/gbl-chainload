@@ -10,8 +10,8 @@ cd "$(dirname "$0")/../.."
 : "${SOURCE_DATE_EPOCH:=0}"
 export SOURCE_DATE_EPOCH
 
-PE=tests/images/pe/infiniti-EU-16.0.5.703.efi
-[ -f "$PE" ] || { echo "SKIP: $PE missing — run scripts/extract-pe-from-fv.sh first" >&2; exit 0; }
+PE=tests/fixtures/pe/infiniti-EU-16.0.5.703.efi
+[ -f "$PE" ] || { echo "SKIP: $PE missing — restore the tracked PE fixture" >&2; exit 0; }
 
 # PR2 Task 8: the 7 host C tools became `gbl <sub>` subcommands of a
 # single Rust multicall binary. Build it once and prepend to PATH.

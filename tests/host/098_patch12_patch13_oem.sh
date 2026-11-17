@@ -10,7 +10,7 @@ rustc --edition=2021 -C panic=abort tests/host/helpers/patch_oem_scope.rs \
   -L dependency=target/release/deps -o "$OUT/check"
 
 shopt -s nullglob
-images=(tests/images/*-abl.img)
+images=(tests/fixtures/abl/*-abl.img)
 [ "${#images[@]}" -gt 0 ] || { echo "SKIP: 098 — no ABL fixtures present"; exit 0; }
 pes=()
 

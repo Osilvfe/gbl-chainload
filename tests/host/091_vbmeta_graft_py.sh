@@ -8,7 +8,7 @@ cargo build --release --quiet -p gbl
 OUT=tests/host/.last/091
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-FX=tests/images/grafted-recovery.img
+FX=tests/fixtures/recovery/grafted-recovery.img
 [ -f "$FX" ] || { echo "SKIP: $FX absent"; exit 0; }
 
 # PR2 Task 8: scripts/vbmeta-graft.py now resolves `gbl` (former

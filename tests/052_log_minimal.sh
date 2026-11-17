@@ -14,7 +14,7 @@
 # 8. LogFsLib.h exports ONLY LogFsInit and LogFsClose; LogFsWrite, LogFsFlush,
 #    LogFsIsReady, LogFsInstallDebugSink, LogFsRemoveDebugSink are absent.
 #
-# Host-side only; on-device verification is manual per CLAUDE.md.
+# Host-side only; on-device verification is manual per AGENTS.md.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."

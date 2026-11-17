@@ -54,7 +54,7 @@ trap 'rm -rf "$STAGE"' EXIT
 cp -r "$SUB"/. "$STAGE"/
 rm -rf "$STAGE/update-tools.sh" "$STAGE/README.md"
 # strip VCS/agent dotfiles at every level (.git, .github, .gitignore,
-# .omc, ...) - the cp above pulls in the submodule's nested state.
+# editor caches, ...) - the cp above pulls in the submodule's nested state.
 find "$STAGE" -mindepth 1 -name '.*' -prune -exec rm -rf {} +
 
 # --- substitute project VERSION placeholder in update-binary ---

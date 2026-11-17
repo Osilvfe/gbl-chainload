@@ -24,7 +24,7 @@
 //! one gate is understood and another is not is left untouched instead of
 //! becoming half-permissive (flash accepted, erase still refused).
 //!
-//! See `docs/project/re-findings.md`.
+//! See `docs/research/findings.md`.
 
 use crate::internal::arm64_decode::{decode_adrp_add, decode_branch, Arm64InsnKind};
 use crate::internal::encode::{encode_b_uncond, read_instr_u32, write_instr_u32};
@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn tracked_infiniti_fixture_resolves_all_four_gates() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/images/pe/infiniti-EU-16.0.5.703.efi");
+            .join("../../tests/fixtures/pe/infiniti-EU-16.0.5.703.efi");
         let Ok(data) = std::fs::read(&path) else {
             return;
         };

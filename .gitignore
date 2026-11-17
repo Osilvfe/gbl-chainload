@@ -41,12 +41,12 @@ tests/host/.last/
 .omc/
 tests/*/.omc/
 
-# Stock OTA partition images — top-level only.
-# (Anchored with a leading slash so `tests/images/` stays tracked: that's
-# where committed ABL fixtures for the patch test harness live.)
+# Private firmware inputs and local investigation scratch data
+/local/*
+!/local/README.md
+
+# Keep legacy local dumps ignored after the directory migration
 /images/
-!/images/.gitkeep
-!/images/README.md
 
 # host-tool cross-compile artifacts
 tools/*/*.exe

@@ -71,7 +71,7 @@ fn derive_infiniti_vbmeta_matches_golden() {
     // The fixture is only present in dev trees with the OEM bundle
     // unpacked; skip if absent (matches the host-test SKIP pattern in
     // tests/host/079_mode2_profile_derive.sh).
-    let vbmeta_path = repo_root().join("tests/images/vbmeta-infiniti-IN-16.0.7.201.img");
+    let vbmeta_path = repo_root().join("tests/fixtures/avb/vbmeta-infiniti-IN-16.0.7.201.img");
     if !vbmeta_path.exists() {
         eprintln!("SKIP: derive_infiniti_vbmeta_matches_golden — fixture {} missing",
                   vbmeta_path.display());

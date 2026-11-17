@@ -46,7 +46,7 @@
         the sm8850 family (fairlady included), it is only the open BSP that has
         no caller. RE follow-up to recover the pointee
         layout so it can be healed instead of dropped — see
-        docs/project/re-findings.md "Device: macan / sm8845".
+        docs/research/findings.md "Device: macan / sm8845".
         (FakelockOverlay_ShouldDropKmDeviceStateWrite.)
 **/
 #include "FakelockOverlay.h"

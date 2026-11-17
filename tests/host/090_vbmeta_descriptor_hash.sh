@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 cargo build --release --quiet -p gbl
 PATH="$PWD/target/release:$PATH"; export PATH
 
-FX=tests/images/grafted-recovery.img
+FX=tests/fixtures/recovery/grafted-recovery.img
 [ -f "$FX" ] || { echo "SKIP: $FX absent"; exit 0; }
 
 OUT=tests/host/.last/090

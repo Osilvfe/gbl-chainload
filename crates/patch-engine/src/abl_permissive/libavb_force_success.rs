@@ -18,7 +18,7 @@
 //!   function to return `AVB_SLOT_VERIFY_RESULT_OK` regardless of
 //!   internal `ret` state.
 //!
-//! See `docs/project/re-findings.md`.
+//! See `docs/research/findings.md`.
 
 use crate::internal::arm64_decode::find_adrp_add_targeting;
 use crate::internal::encode::{read_instr_u32, write_instr_u32};
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn tracked_infiniti_fixture_still_applies() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/images/pe/infiniti-EU-16.0.5.703.efi");
+            .join("../../tests/fixtures/pe/infiniti-EU-16.0.5.703.efi");
         let Ok(data) = std::fs::read(&path) else {
             return;
         };

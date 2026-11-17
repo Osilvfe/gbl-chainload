@@ -24,8 +24,8 @@ cargo build --release --quiet -p gbl
 OUT=tests/host/.last/096
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-STOCK=tests/images/recovery-infiniti-IN-16.0.7.201.img
-CUSTOM=tests/images/recovery-infiniti-OrangeFox.img
+STOCK=tests/fixtures/recovery/recovery-infiniti-IN-16.0.7.201.img
+CUSTOM=tests/fixtures/recovery/recovery-infiniti-OrangeFox.img
 [ -f "$STOCK" ]  || { echo "SKIP: $STOCK absent (LFS not pulled?)"; exit 0; }
 [ -f "$CUSTOM" ] || { echo "SKIP: $CUSTOM absent (LFS not pulled?)"; exit 0; }
 # LFS pointer files are 134 B; insist on real content.

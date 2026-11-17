@@ -42,7 +42,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn infiniti_pe() -> Option<Vec<u8>> {
-    let path = repo_root().join("tests/images/pe/infiniti-EU-16.0.5.703.efi");
+    let path = repo_root().join("tests/fixtures/pe/infiniti-EU-16.0.5.703.efi");
     if !path.exists() {
         return None;
     }

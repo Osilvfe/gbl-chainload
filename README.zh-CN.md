@@ -16,7 +16,7 @@
 - patch12/13 必须在 GBL 已运行、且修改后的 ABL 被加载后才能生效，不能解决 GBL 运行之前的启动故障。
 - 静态补丁命中、主机测试通过，不等于对应机型已完成实机启动验证。
 
-本文按当前脚本与代码说明用法；历史实验、设备差异和逆向结论见 [项目文档](docs/project/README.md)。版本号以 [VERSION](VERSION) 为准。
+本文按当前脚本与代码说明用法；[文档索引](docs/README.md) 区分逆向研究、组件集成、项目记录与历史归档。版本号以 [VERSION](VERSION) 为准。
 
 ## 工作原理与适用范围
 
@@ -35,7 +35,7 @@ ABL 提取、必要补丁或交接失败时，程序会尝试返回 GBL Fastboot
 
 项目主要面向 OnePlus / Oppo 等 Oplus 设备。当前 ABL 测试池包含一加 15（infiniti）、一加 15T（fairlady）、一加 Ace 6T（macan）及部分小米 / Redmi 样本，共 13 份去重镜像。**这是补丁回归覆盖范围，不是通用兼容机型名单**；还需要设备本身具有可用的 GBL / EFISP 加载入口。
 
-样本来源、版本证据和测试用途见 [测试镜像说明](tests/images/README.md)。不要把测试池内其他机型的 ABL 用于自己的设备。
+样本来源、版本证据和测试用途见 [测试镜像说明](tests/fixtures/README.md)。不要把测试池内其他机型的 ABL 用于自己的设备。
 
 ## 运行模式
 
@@ -74,7 +74,7 @@ mode-2 在加载或动态修改 ABL 前校验 profile。profile 缺失或无效�
 
 所有模式都安装通用保护：抑制已处理的三类 TZ soft-fuse / rollback-update SCM 调用，并吞掉已匹配的 `oplusreserve1` / `opporeserve1` 分区写入，包括 token 清零写入。这些是针对特定接口和分区的拦截，不是全局只读策略，也不保证降级固件安全。
 
-mode-1 下，VB `WRITE_CONFIG` 是**先修正为 unlocked，再转发**，并非简单丢弃。VB device reset、OplusSec `write_rpmb_boot_info`（`0x0A`）和 KeyMaster `WRITE_KM_DEVICE_STATE`（`0x203`）则在对应拦截路径被抑制，目标是让 fakelock 保持临时状态，而非把伪装的锁定记录持久化。该策略不是按 SoC 设置的白名单；设备观测和仍存在的不确定性见 [逆向结论](docs/project/re-findings.md)。
+mode-1 下，VB `WRITE_CONFIG` 是**先修正为 unlocked，再转发**，并非简单丢弃。VB device reset、OplusSec `write_rpmb_boot_info`（`0x0A`）和 KeyMaster `WRITE_KM_DEVICE_STATE`（`0x203`）则在对应拦截路径被抑制，目标是让 fakelock 保持临时状态，而非把伪装的锁定记录持久化。该策略不是按 SoC 设置的白名单；设备观测和仍存在的不确定性见 [逆向结论](docs/research/findings.md)。
 
 不要为了验证这些拦截而重新上锁或切槽。已有日志中的 `write-swallow`、`token-zero-write`、`healed->unlocked`、`WRITE_KM_DEVICE_STATE` 可作为检查线索，但单独出现这些事件不构成完整的安全证明。
 
@@ -229,7 +229,7 @@ fastboot oem boot-nodtbo
 
 当前源码构建已跳过 GBL 临时启动路径的 verified-boot 警告 UI，通过 `BoardInit()` 初始化平台信息而非硬编码 fairlady ID，并包含 LibUfdt overlay 分配器的状态重置与释放修复。GBL 自身的启动路径与修改后的 ABL 路径相互独立：跳过警告 UI 不等于关闭 AVB，正常启动 Android 也不能证明所有 `fastboot boot` 镜像都能工作。
 
-旧的 [二进制补丁工具](scripts/gbl-fastboot-boot-fix.py) 面向特定历史 EFI 布局，不是当前构建后的必需步骤，不应盲目用于新固件。历史偏移、观测和诊断轨迹保留在 [逆向结论](docs/project/re-findings.md) 中。
+旧的 [二进制补丁工具](scripts/gbl-fastboot-boot-fix.py) 面向特定历史 EFI 布局，不是当前构建后的必需步骤，不应盲目用于新固件。历史偏移、观测和诊断轨迹保留在 [逆向结论](docs/research/findings.md) 中。
 
 ## 可选：集成 UniXNU
 
@@ -266,7 +266,7 @@ fastboot oem boot-unixnu
 
 `payload.fat` 应为原始 FAT 文件系统镜像，包含 `EFI/UniXNU/unixnu.toml` 及配置引用的启动文件。GBL 将它暴露为只读 RAM 磁盘，再启动嵌入的 UniXNU；**默认启动、按键和超时不会自动选择 UniXNU，Android 仍是正常默认目标**。
 
-fairlady 已有 Android 与 Darwin 启动反馈，但这不等于所有 Darwin 驱动或用户空间都已验证。实现细节与对应测试镜像记录见 [UniXNU 集成说明](docs/notes/unixnu-clo-r25.md)。
+fairlady 已有 Android 与 Darwin 启动反馈，但这不等于所有 Darwin 驱动或用户空间都已验证。实现细节与对应测试镜像记录见 [UniXNU 集成说明](docs/integrations/unixnu-clo-r25.md)。
 
 ## 日志与故障定位
 
@@ -314,6 +314,7 @@ bash tests/host/098_patch12_patch13_oem.sh
 bash tests/host/099_mode2_runtime.sh
 bash tests/host/100_native_build.sh
 bash tests/host/101_build_defines.sh
+bash tests/host/102_repository_layout.sh
 ```
 
 `098` 对所有样本同时验证主机与固件引擎的 mode-0 / mode-1 / mode-2：模式 0/1 没有 patch11，模式 2 才启用；同时检查 OEM 选择、品牌识别、patch12/13 的 6+3 处改写、重复应用及 GPT 写入位置不变。
@@ -324,20 +325,27 @@ bash tests/host/101_build_defines.sh
 
 `101` 验证字符串宏经过 shell 与 EDK2 规范化后的 GCC 响应文件时的引号语义，覆盖干净 CI 构建触发的长命令路径。
 
+`102` 检查目录整理后的文档索引、归档任务路径、样本分类、Git LFS 规则和私有输入忽略策略。
+
 全量测试需要额外准备：部分 recovery 测试镜像通过 Git LFS 保存，需使用 `git lfs pull` 获取真实内容；部分 mode-2 parity 测试还依赖 `082_mode2_profile_parity.sh` 生成的 golden 文件及包括 `avbtool` 在内的派生测试前置条件。应先取得真实样本并补齐参考文件再判断全量测试结果，不能把 LFS 指针当作镜像，也不能仅凭前置文件缺失就认定补丁回归。
 
 ### 仓库目录
 
 | 路径 | 内容 |
 | --- | --- |
+| `AGENTS.md` | 不绑定特定工具的协作规范与设备操作安全边界 |
 | `GblChainloadPkg/` | EFI 入口、启动流程、协议拦截及载荷处理 |
 | `GblChainloadPkg/Library/ProtocolHookLib/` | 通用 `UniversalBaseline.c`、mode-1 `FakelockOverlay.c`、mode-2 `ProfileOverlay.c` |
 | `crates/patch-engine/` | Rust 补丁引擎；始终启用的跨品牌补丁在 `abl_permissive/`，patch11 在 `mode2/`，Oplus 补丁在 `oem/oplus/` |
 | `tools/gbl/` | 主机 / recovery 多功能工具 |
 | `edk2/` | 固定提交的 CLO edk2 派生子模块 |
 | `scripts/` | 构建、拼接及开发辅助脚本 |
-| `tests/images/` | 去重后的 ABL 等测试样本 |
-| `docs/project/` | 当前状态、逆向结论、决策及上游问题记录 |
+| `tests/` | 回归测试，以及按类型分类的 `fixtures/{abl,pe,avb,recovery}/` 样本 |
+| `docs/` | 文档索引、`research/` 研究、`integrations/` 集成、`project/` 项目记录及历史 `archive/` |
+| `local/` | 忽略的私有固件输入与临时笔记；仅 README 受版本控制 |
+| `Build/`、`target/`、`dist/`、`logs/` | 忽略的编译缓存、产物与现有设备日志 |
+
+完整目录说明见 [docs/README.md](docs/README.md) 和 [tests/README.md](tests/README.md)。本次不改变固件源码、构建入口及输出路径；`zip/` 安装器子模块留待单独迁移。
 
 ### 发布与文档维护
 

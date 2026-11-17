@@ -9,7 +9,7 @@ cd "$(dirname "$0")/../.."
 : "${SOURCE_DATE_EPOCH:=0}"
 export SOURCE_DATE_EPOCH
 
-PE=tests/images/pe/infiniti-EU-16.0.5.703.efi
+PE=tests/fixtures/pe/infiniti-EU-16.0.5.703.efi
 [ -f "$PE" ] || { echo "SKIP: $PE missing"; exit 0; }
 
 cargo build --release --quiet -p gbl

@@ -4,15 +4,15 @@
 #     deleted tests/scan + tests/patches C harnesses)
 #   - builds tools/abl-patcher
 #   - runs anchor-uniqueness check via abl-patcher --check-anchors-only
-#     against every ABL fixture present in tests/images/
+#     against every ABL fixture present in tests/fixtures/
 #   - reports a non-zero exit if any anchor-uniqueness check fails on a
 #     present fixture
 #
-# Fixture discovery: globs tests/images/*.{efi,bin,img}. Override via env:
+# Fixture discovery: tests/fixtures/{abl,pe}/ plus flat override directories:
 #   FIXTURES_DIR=/path/to/blobs ./tests/042_dynamic_patch_harness.sh
 #
-# Fixture blobs are gitignored device firmware — locally the user drops
-# them into tests/images/; CI runs with whatever is committed there.
+# Curated fixtures are tracked; private firmware inputs belong in
+# local/firmware/. CI runs against the committed fixture pool.
 #
 # PR2 Task 6: the engine moved into crates/patch-engine (Rust). The C
 # harnesses under tests/scan/ + tests/patches/ were deleted because the
@@ -22,7 +22,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-FIXTURES_DIR="${FIXTURES_DIR:-tests/images}"
+FIXTURES_DIR="${FIXTURES_DIR:-tests/fixtures}"
 
 # 1. Rust patch-engine tests (unit + parity).
 echo "== cargo test -p patch-engine =="
@@ -46,8 +46,8 @@ ABL_PATCHER=(./target/release/gbl patch)
 #            FV→PE extractor lands (see scripts/extract-pe-from-fv.sh /
 #            tools/fv-unwrap follow-up).
 shopt -s nullglob
-PE_FIXTURES=( "$FIXTURES_DIR"/*.efi )
-FV_FIXTURES=( "$FIXTURES_DIR"/*.bin "$FIXTURES_DIR"/*.img )
+PE_FIXTURES=( "$FIXTURES_DIR"/pe/*.efi "$FIXTURES_DIR"/*.efi )
+FV_FIXTURES=( "$FIXTURES_DIR"/abl/*.bin "$FIXTURES_DIR"/abl/*.img "$FIXTURES_DIR"/*.bin "$FIXTURES_DIR"/*.img )
 shopt -u nullglob
 
 FAIL=0

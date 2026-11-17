@@ -47,10 +47,10 @@ EOF
 chmod +x "$OUT/tools/gbl"
 
 # An fv-unwrap input is a raw ABL partition (LZMA-FV wrapped). The
-# tests/images/ dir also holds non-ABL fixtures (grafted-recovery.img,
-# vbmeta-*.img, …), so glob specifically for an *abl*.img.
-ABL=$(ls tests/images/*abl*.img 2>/dev/null | head -1 || true)
-[ -n "$ABL" ] || { echo "SKIP: 085 — no tests/images/*abl*.img fixture present"; exit 0; }
+# tests/fixtures/abl/ contains only curated ABL wrappers, separate from
+# recovery and vbmeta fixtures.
+ABL=$(ls tests/fixtures/abl/*abl*.img 2>/dev/null | head -1 || true)
+[ -n "$ABL" ] || { echo "SKIP: 085 — no tests/fixtures/abl/*abl*.img fixture present"; exit 0; }
 
 # A throwaway base EFI: efisp-package.py just concatenates it, so any
 # small file with a PE 'MZ' header is enough for the structural check.
@@ -124,7 +124,7 @@ python3 scripts/efisp-package.py \
   && { echo "FAIL: mode 2 accepted without --stock-vbmeta"; exit 1; } || true
 
 # mode 2 success — stock-vbmeta profile + strict patch11 bundle.
-VBMETA=tests/images/vbmeta-infiniti-IN-16.0.7.201.img
+VBMETA=tests/fixtures/avb/vbmeta-infiniti-IN-16.0.7.201.img
 if [ -f "$VBMETA" ]; then
   python3 scripts/efisp-package.py \
     --abl "$ABL" --mode 2 --efi "$OUT/base.efi" --stock-vbmeta "$VBMETA" \

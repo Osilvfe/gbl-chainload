@@ -17,7 +17,7 @@ Host + recovery tooling for gbl-chainload. A single Rust multicall binary
 
 Argv shape, exit codes, and byte-for-byte outputs are preserved against the
 captured C-tool golden outputs in `tests/host/goldens/` (see
-`docs/superpowers/pr-evidence/2026-05-23-rust-consolidation-parity.md` for
+`docs/archive/validation/2026-05-23-rust-consolidation-parity.md` for
 the bit-level parity report). The Python parity tools
 (`scripts/mode2-profile.py`, `scripts/vbmeta-graft.py`) still exist as
 reference / convenience wrappers and now dispatch through `gbl <sub>`
@@ -361,11 +361,12 @@ fastboot stage installed.efi
 fastboot oem boot-efi
 ```
 
-`fastboot stage` + `fastboot oem boot-efi` is a one-shot RAM load that
-survives a power cycle without persistent writes. Never flash an EFI
-overlay to a non-HLOS partition without operator-in-the-loop
-verification — the `.claude/hooks/block-non-hlos-flash.py` PreToolUse
-hook will block such commands inside an agent session.
+`fastboot stage` + `fastboot oem boot-efi` loads the EFI into RAM for the
+current boot without flashing EFISP. The boot chain may still write logs
+or boot metadata; RAM staging is not a general read-only guarantee.
+Follow [AGENTS.md](../AGENTS.md) for operator-controlled device testing and
+partition-write restrictions. Do not assume an editor-specific safety hook
+is installed.
 
 ## Advanced usage
 

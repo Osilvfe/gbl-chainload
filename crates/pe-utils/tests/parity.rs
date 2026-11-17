@@ -16,7 +16,7 @@ fn fixtures_dir() -> PathBuf {
     p.pop();
     p.pop();
     p.push("tests");
-    p.push("images");
+    p.push("fixtures");
     p.push("pe");
     p
 }

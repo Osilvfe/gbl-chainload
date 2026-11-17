@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Extract fixture binaries used by tests/042 anchor-uniqueness CI.
-# Inputs: stock OTA partition images dropped into images/canoe-stock-A.07_2024_02_05/
-# Outputs: fixtures/canoe-A.07/abl_a.bin (a verbatim copy that CI can rely on)
+# Inputs: stock OTA partition images dropped into local/firmware/canoe-stock-A.07_2024_02_05/
+# Outputs: local/firmware/fixtures/canoe-A.07/abl_a.bin (a private verbatim copy)
 set -euo pipefail
 
-SRC_DIR="${1:-images/canoe-stock-A.07_2024_02_05}"
-DEST_DIR="${2:-images/fixtures/canoe-A.07}"
+SRC_DIR="${1:-local/firmware/canoe-stock-A.07_2024_02_05}"
+DEST_DIR="${2:-local/firmware/fixtures/canoe-A.07}"
 
 # Resolve relative to repo root if not absolute.
 if [[ "$SRC_DIR" != /* ]]; then

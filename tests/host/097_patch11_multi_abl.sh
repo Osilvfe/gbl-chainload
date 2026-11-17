@@ -25,7 +25,7 @@
 # mandatory-miss on a pre-patched PE (abl-patcher exits non-zero), so
 # pass 2 runs under `|| true` and asserts only the patch11 line.
 #
-# Uses the tracked tests/images/ ABL fixtures, so it runs in CI (not SKIP).
+# Uses the tracked tests/fixtures/ ABL fixtures, so it runs in CI (not SKIP).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -38,7 +38,7 @@ OUT=tests/host/.last/097
 mkdir -p "$OUT"
 
 shopt -s nullglob
-ALL_ABLS=(tests/images/*-abl.img)
+ALL_ABLS=(tests/fixtures/abl/*-abl.img)
 
 ran=0
 
