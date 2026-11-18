@@ -21,6 +21,11 @@
   Entry.c
   Stubs.c
   BootFlow.c
+  UsbMscScsi.c
+  UsbMscMedia.c
+  UsbMscUsb.c
+  UsbMscFastboot.c
+  SlotAttrs.c
 
 [Packages]
   ArmPkg/ArmPkg.dec
@@ -106,6 +111,7 @@
   gEfiLoadFileProtocolGuid
   gEfiDiskIoProtocolGuid
   gEfiUsbIoProtocolGuid
+  gEfiUsbfnIoProtocolGuid
   gEfiPlatformInfoProtocolGuid
   gEfiChipInfoProtocolGuid
   gQcomPmicVersionProtocolGuid

@@ -1,0 +1,69 @@
+diff --git a/QcomModulePkg/Library/FastbootLib/FastbootMain.c b/QcomModulePkg/Library/FastbootLib/FastbootMain.c
+index fb37db134..945947358 100755
+--- a/QcomModulePkg/Library/FastbootLib/FastbootMain.c
++++ b/QcomModulePkg/Library/FastbootLib/FastbootMain.c
+@@ -102,6 +102,13 @@ extern EFI_STATUS GblFastbootEscapeToBootFlow (VOID);
+ extern BOOLEAN GblFastbootEspBootPending;
+ extern EFI_STATUS GblFastbootEspBootDeferred (VOID);
+
++#if defined (GBL_USB_MSC)
++extern VOID GblUsbMscRegisterCommands (VOID);
++extern VOID GblUsbMscCancel (VOID);
++extern BOOLEAN GblUsbMscRequested (VOID);
++extern EFI_STATUS GblUsbMscRun (OUT BOOLEAN *Released);
++#endif
++
+ #define USB_BUFF_SIZE USB_BUFFER_SIZE
+
+ /* Global fastboot data */
+@@ -219,6 +226,9 @@ STATIC EFI_STATUS FastbootUsbDeviceStart (VOID)
+   }
+
+   /* Build the descriptor for fastboot */
++#if defined (GBL_USB_MSC)
++  GblUsbMscRegisterCommands ();
++#endif
+   BuildDefaultDescriptors (&DevDesc, &Descriptors, &SSDevDesc, &SSDescriptors);
+   UsbSpeedDataSize = sizeof (UsbMaxSupportSpeed);
+   Status = gRT->GetVariable ((CHAR16 *)L"UsbfnMaxSpeed",
+@@ -454,6 +464,40 @@ EFI_STATUS FastbootInitialize (VOID)
+       break;
+     }
+
++#if defined (GBL_USB_MSC)
++    if (GblUsbMscRequested ()) {
++      BOOLEAN Released;
++
++      ExitMenuKeysDetection ();
++      GblFastbootEscapePending = FALSE;
++      GblFastbootEspBootPending = FALSE;
++      mUsbRxPending = FALSE;
++      Status = Fbd.UsbDeviceProtocol->Stop ();
++      if (EFI_ERROR (Status)) {
++        GblUsbMscCancel ();
++        return Status;
++      }
++      gBS->Stall (250000);
++      Status = GblUsbMscRun (&Released);
++      DEBUG ((EFI_D_INFO, "Fastboot: USB MSC returned %r, released=%d\n", Status, Released));
++      if (!Released) {
++        return EFI_DEVICE_ERROR;
++      }
++      gBS->Stall (250000);
++      Status = gBS->LocateProtocol (&gEfiUsbDeviceProtocolGuid, NULL,
++                                     (VOID **)&Fbd.UsbDeviceProtocol);
++      if (EFI_ERROR (Status)) {
++        return Status;
++      }
++      Status = Fbd.UsbDeviceProtocol->StartEx (&DescSet);
++      if (EFI_ERROR (Status)) {
++        return Status;
++      }
++      DisplayFastbootMenu ();
++      continue;
++    }
++#endif
++
+     /* Menu Escape handler runs at TPL_CALLBACK in a timer notify and
+      * defers the actual chainload here, where we're at TPL_APPLICATION. */
+     if (GblFastbootEscapePending) {

@@ -231,6 +231,20 @@ fastboot oem boot-nodtbo
 
 旧的 [二进制补丁工具](scripts/gbl-fastboot-boot-fix.py) 面向特定历史 EFI 布局，不是当前构建后的必需步骤，不应盲目用于新固件。历史偏移、观测和诊断轨迹保留在 [逆向结论](docs/research/findings.md) 中。
 
+## 实验性 USB 大容量设备
+
+在 GBL Fastboot 中执行 `fastboot oem usb-msc`，USB 会切换为包含
+`README.TXT` 的 **1 MiB 只读 FAT12 内存盘**，默认不导出内部任何分区
+或已 stage 的镜像。设备已解锁时，`fastboot oem usb-msc boot_a` 改为
+**只读导出该 GPT 分区**，通过 BlockIO 分块读取，不将整个分区复制到
+RAM。不自动选槽、不导出整盘，所有主机写入均被拒绝。
+MSC 工作期间 Fastboot 暂时不可用；
+弹出磁盘、按音量键或断开线缆后，会尝试恢复同一次 Fastboot 会话。
+默认启动 Android 的策略不变，不通过这个接口提供可写 payload 盘。
+
+临时加载和验证步骤见 [MSC 集成说明](docs/integrations/usb-mass-storage.md)。
+主机协议测试与固件编译通过，不代表已验证设备兼容性。
+
 ## 可选：集成 UniXNU
 
 集成对象是 UniXNU EFI 应用及 DarwinBoot EFI 驱动，复用 GBL 的同一套 CLO edk2 核心；不需要再嵌套加载一份 Mu 固件或 FD。
@@ -315,6 +329,7 @@ bash tests/host/099_mode2_runtime.sh
 bash tests/host/100_native_build.sh
 bash tests/host/101_build_defines.sh
 bash tests/host/102_repository_layout.sh
+bash tests/host/103_usb_msc.sh
 ```
 
 `098` 对所有样本同时验证主机与固件引擎的 mode-0 / mode-1 / mode-2：模式 0/1 没有 patch11，模式 2 才启用；同时检查 OEM 选择、品牌识别、patch12/13 的 6+3 处改写、重复应用及 GPT 写入位置不变。
@@ -326,6 +341,8 @@ bash tests/host/102_repository_layout.sh
 `101` 验证字符串宏经过 shell 与 EDK2 规范化后的 GCC 响应文件时的引号语义，覆盖干净 CI 构建触发的长命令路径。
 
 `102` 检查目录整理后的文档索引、归档任务路径、样本分类、Git LFS 规则和私有输入忽略策略。
+
+`103` 在主机 sanitizer 下检查只读 MSC 的 SCSI/BOT、USB 事件、复位与 DMA 生命周期、Fastboot 应答及集成补丁的可重现应用。
 
 全量测试需要额外准备：部分 recovery 测试镜像通过 Git LFS 保存，需使用 `git lfs pull` 获取真实内容；部分 mode-2 parity 测试还依赖 `082_mode2_profile_parity.sh` 生成的 golden 文件及包括 `avbtool` 在内的派生测试前置条件。应先取得真实样本并补齐参考文件再判断全量测试结果，不能把 LFS 指针当作镜像，也不能仅凭前置文件缺失就认定补丁回归。
 

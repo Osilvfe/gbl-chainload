@@ -63,6 +63,14 @@ else
   git -C edk2 apply "$BOOTFIX_PATCH"
 fi
 
+MSC_PATCH="$REPO_ROOT/scripts/edk2/gbl-usb-msc.patch"
+if grep -q 'GblUsbMscRegisterCommands' edk2/QcomModulePkg/Library/FastbootLib/FastbootMain.c; then
+  git -C edk2 apply --reverse --check "$MSC_PATCH"
+else
+  git -C edk2 apply --check "$MSC_PATCH"
+  git -C edk2 apply "$MSC_PATCH"
+fi
+
 GBL_CHAINLOAD_VERSION="$(head -n1 VERSION | tr -d '[:space:]')"
 [[ -n "$GBL_CHAINLOAD_VERSION" ]] || { echo "VERSION is empty" >&2; exit 1; }
 
