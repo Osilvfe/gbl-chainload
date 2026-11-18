@@ -35,22 +35,20 @@ flash is genuinely needed, explain the proposed command and risks, and
 let the user execute it in their own terminal. These are documented safety
 constraints; do not assume a particular tool installs or enforces hooks.
 
-## Workflow: branch then PR
+## Workflow: local merges
 
-Work happens on feature branches; landing on `main` is via PR.
+Integrate changes into `main` locally, then push to the maintained remote.
+A pull request is not required; open one only when explicitly requested.
 
-- Ceremony scales with the change. Use the lightest workflow that fits:
-  - **Direct commit to `main`** is fine for a single-commit trivial fix —
-    a typo, a one-line shell fix, a comment-only doc tweak — where the
-    diff is self-evidently safe. Push directly; no PR.
-  - **Single-commit PR** for anything touching multiple files or changing
-    behavior in a non-obvious way, even when small.
-  - **Multi-commit feature branch + PR** for larger work — iterate freely
-    on the branch, the PR grows new commits as feedback comes in.
-- Never force-push `main`, even for a typo fix. Push a follow-up commit.
-- **Version bumps (`VERSION` + `CHANGELOG.md`) always land as their own
-  focused PR — explicit on main, no bundling with feature work.** Use
-  `scripts/release.sh X.Y.Z` to scaffold the branch + PR.
+- Small, focused changes may be committed directly to `main` when requested.
+- Feature branches are useful for larger or experimental work. When ready
+  and integration is requested, merge them into `main` locally and push.
+- Keep commits focused. Version bumps (`VERSION` + `CHANGELOG.md`) stay
+  separate from feature work, without a mandatory release PR.
+- Never force-push `main`. Push a follow-up commit instead.
+
+Archived upstream plans and specifications are historical records, not
+current workflow requirements.
 
 Follow explicit user requests about target branches and review workflow.
 Do not commit, push, create branches, open PRs or tag releases unless
