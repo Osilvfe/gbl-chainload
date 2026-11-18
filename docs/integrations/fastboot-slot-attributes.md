@@ -1,5 +1,10 @@
 # Fastboot slot attribute commands
 
+These are experimental diagnostic and repair commands, not a guarantee of
+bootability or data safety. `slot-show` is read-only; `slot-set` changes
+persistent boot metadata only when explicitly invoked without `dry-run`.
+Do not deliberately exhaust retries or mark both slots unbootable to test it.
+
 The GBL Fastboot build registers two OEM commands for inspecting and repairing
 the A/B slot metadata stored in the `boot_a` / `boot_b` GPT entries:
 
@@ -135,3 +140,20 @@ ASan/UBSan and injected write, flush, read, allocation and media-change errors.
 It also covers GUID formatting, slot filtering, all four standard-boot-GUID
 mapping results, separately validated ABL LUNs, and reporting on-disk GUIDs
 when cached ABL GUIDs differ.
+
+## Device validation and unresolved GPT warning
+
+On fairlady, live diagnostics and an explicit `boot_b` attribute edit were
+exercised on 2026-11-18. Read-back reported matching primary/backup entries
+and valid CRCs. The subsequent Android boot failed in first-stage init's
+AVB verification, and its kernel log also reported `Alternate GPT is invalid,
+using primary GPT.` The timing and cause of that GPT warning are not yet
+established; neither the successful read-back nor the AVB diagnosis proves
+that all later firmware writes and Linux GPT checks are compatible.
+
+The host regression reproduces the observed missing-active-slot state and
+checks that only the requested `boot_b` attributes and GPT CRCs change,
+preserving A, ABL entries, GUIDs and boot LUN. This is not a device-wide
+validation of GPT repair or power-loss recovery. Preserve backups and do
+not bypass a GPT validation failure or treat a successful write as proof
+that the target slot is safe to boot.

@@ -989,6 +989,16 @@ STATIC VOID PartitionCommandTests (VOID) {
     assert (mFail && !mAck && !GblUsbMscRequested () && !mMscPrepared);
     assert (mStopCalls == 0 && mPreparedMedia.Context == NULL);
   }
+  if (!GBL_USB_MSC_PARTITION_EXPORT) {
+    ResetMocks ();
+    GblUsbMscRegisterCommands ();
+    mCommand (" boot_a", NULL, 0);
+    assert (mFail && !mAck && !GblUsbMscRequested () && !mMscPrepared);
+    assert (mBlockReads == 0 && mStopCalls == 0 && mStalls == 0);
+    assert (mPreparedMedia.Context == NULL);
+    ResetMocks ();
+    return;
+  }
   ResetMocks ();
   GblUsbMscRegisterCommands ();
   mUnlocked = FALSE;

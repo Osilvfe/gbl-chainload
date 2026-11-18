@@ -44,6 +44,10 @@ CmdUsbMsc (IN CONST CHAR8 *Argument, IN VOID *Data, IN UINT32 Size)
     FastbootFail ("usage: oem usb-msc [exact-partition-name]");
     return;
   }
+  if (NameLength != 0 && !GBL_USB_MSC_PARTITION_EXPORT) {
+    FastbootFail ("partition export is disabled in this build; use oem usb-msc");
+    return;
+  }
   if (!FlashComplete ()) {
     FastbootFail ("wait for the current flash operation to finish");
     return;

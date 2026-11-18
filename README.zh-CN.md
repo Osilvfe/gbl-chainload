@@ -235,15 +235,24 @@ fastboot oem boot-nodtbo
 
 在 GBL Fastboot 中执行 `fastboot oem usb-msc`，USB 会切换为包含
 `README.TXT` 的 **1 MiB 只读 FAT12 内存盘**，默认不导出内部任何分区
-或已 stage 的镜像。设备已解锁时，`fastboot oem usb-msc boot_a` 改为
-**只读导出该 GPT 分区**，通过 BlockIO 分块读取，不将整个分区复制到
-RAM。不自动选槽、不导出整盘，所有主机写入均被拒绝。
+或已 stage 的镜像。普通构建禁用指定分区导出；其只读后端已通过主机
+测试，仍待实机验证。不自动选槽、不导出整盘，所有主机写入均被拒绝。
 MSC 工作期间 Fastboot 暂时不可用；
 弹出磁盘、按音量键或断开线缆后，会尝试恢复同一次 Fastboot 会话。
 默认启动 Android 的策略不变，不通过这个接口提供可写 payload 盘。
 
 临时加载和验证步骤见 [MSC 集成说明](docs/integrations/usb-mass-storage.md)。
 主机协议测试与固件编译通过，不代表已验证设备兼容性。
+
+## 实验性槽位元数据工具
+
+GBL Fastboot 提供 `fastboot oem slot-show`，读取实际主备 GPT、槽位属性、
+GUID 和 UFS boot LUN。`oem slot-set` 支持显式修改属性、`dry-run` 预览及
+写后回读，带有状态保护。它会写入启动元数据，不等于完整切槽，也不能
+证明目标槽可以安全启动。一次 OTA 启动后观察到的备用 GPT 警告尚未
+查明原因，不能将这些命令当作保证成功的恢复流程。
+
+具体限制与验证记录见 [槽位命令说明](docs/integrations/fastboot-slot-attributes.md)。
 
 ## 可选：集成 UniXNU
 
@@ -330,6 +339,7 @@ bash tests/host/100_native_build.sh
 bash tests/host/101_build_defines.sh
 bash tests/host/102_repository_layout.sh
 bash tests/host/103_usb_msc.sh
+bash tests/host/104_slot_attrs.sh
 ```
 
 `098` 对所有样本同时验证主机与固件引擎的 mode-0 / mode-1 / mode-2：模式 0/1 没有 patch11，模式 2 才启用；同时检查 OEM 选择、品牌识别、patch12/13 的 6+3 处改写、重复应用及 GPT 写入位置不变。
@@ -343,6 +353,8 @@ bash tests/host/103_usb_msc.sh
 `102` 检查目录整理后的文档索引、归档任务路径、样本分类、Git LFS 规则和私有输入忽略策略。
 
 `103` 在主机 sanitizer 下检查只读 MSC 的 SCSI/BOT、USB 事件、复位与 DMA 生命周期、Fastboot 应答及集成补丁的可重现应用。
+
+`104` 在主机 sanitizer 下检查多 LUN 槽位/GUID 诊断、GPT 写入范围、状态保护、dry-run 与失败回滚。
 
 全量测试需要额外准备：部分 recovery 测试镜像通过 Git LFS 保存，需使用 `git lfs pull` 获取真实内容；部分 mode-2 parity 测试还依赖 `082_mode2_profile_parity.sh` 生成的 golden 文件及包括 `avbtool` 在内的派生测试前置条件。应先取得真实样本并补齐参考文件再判断全量测试结果，不能把 LFS 指针当作镜像，也不能仅凭前置文件缺失就认定补丁回归。
 

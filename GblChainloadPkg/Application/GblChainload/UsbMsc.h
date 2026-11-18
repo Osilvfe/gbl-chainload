@@ -3,6 +3,10 @@
 
 #include <Uefi.h>
 
+#ifndef GBL_USB_MSC_PARTITION_EXPORT
+#define GBL_USB_MSC_PARTITION_EXPORT 0
+#endif
+
 #define GBL_MSC_BLOCK_SIZE 512U
 #define GBL_MSC_DISK_SIZE (1024U * 1024U)
 #define GBL_MSC_CBW_SIZE 31U

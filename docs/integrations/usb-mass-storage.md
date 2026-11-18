@@ -2,9 +2,11 @@
 
 GBL can temporarily replace its Fastboot USB interface with a single-LUN,
 read-only USB Mass Storage device. With no arguments it exposes a freshly
-generated 1 MiB FAT12 RAM disk containing `README.TXT`. With an exact GPT
-partition name it exports that partition through BlockIO on an unlocked
-device. It never exports a whole UFS LUN, writes to storage, decrypts Android
+generated 1 MiB FAT12 RAM disk containing `README.TXT`. Normal builds reject
+partition arguments before storage access or USB handoff. The named-partition
+backend remains experimental, behind `GBL_USB_MSC_PARTITION_EXPORT=1`; its
+host coverage is not device validation. It never exports a whole UFS LUN,
+writes to storage, decrypts Android
 data, or exports a previous Fastboot download. The existing RAM boot commands
 remain unchanged; a writable RAM payload-transfer disk is not part of MSC.
 
@@ -38,8 +40,8 @@ staged GBL Fastboot, then manually run:
 fastboot oem usb-msc
 ```
 
-To export a real partition instead of the test RAM disk, use the following
-as the MSC command in that Fastboot session:
+Only a separately enabled experimental build accepts the following command;
+it is not part of the normal-build device test procedure:
 
 ```bash
 fastboot oem usb-msc boot_a
