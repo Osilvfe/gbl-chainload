@@ -4,8 +4,10 @@ GBL can temporarily replace its Fastboot USB interface with a single-LUN,
 read-only USB Mass Storage device. With no arguments it exposes a freshly
 generated 1 MiB FAT12 RAM disk containing `README.TXT`. Normal builds reject
 partition arguments before storage access or USB handoff. The named-partition
-backend remains experimental, behind `GBL_USB_MSC_PARTITION_EXPORT=1`; its
-host coverage is not device validation. It never exports a whole UFS LUN,
+backend remains experimental, behind `GBL_USB_MSC_PARTITION_EXPORT=1`; host
+coverage includes a fairlady `boot_a` device test with repeated
+RAM/partition sessions and Fastboot resume. Other devices and partition
+geometries remain unverified. It never exports a whole UFS LUN,
 writes to storage, decrypts Android
 data, or exports a previous Fastboot download. The existing RAM boot commands
 remain unchanged; a writable RAM payload-transfer disk is not part of MSC.
@@ -42,6 +44,18 @@ fastboot oem usb-msc
 
 Only a separately enabled experimental build accepts the following command;
 it is not part of the normal-build device test procedure:
+
+```bash
+bash scripts/build.sh --experimental-usb-msc-partition-export --no-recovery --no-host
+```
+
+This produces `dist/gbl-chainload-msc-partitions.efi`, a **base EFI** that
+still needs the same device-specific packaging described above. The native
+entry also accepts the flag, together with `--release` or `--debug` and an
+optional `--output`. Neither entry enables partition export by default.
+The firmware's build identity gains `-msc-partitions`, visible through
+`fastboot getvar gbl-chainload_build`; verify that identity before trying
+the partition command in a user-coordinated session:
 
 ```bash
 fastboot oem usb-msc boot_a
@@ -89,6 +103,38 @@ attempts to restore the same Fastboot session without a device reboot.
 After reconnecting, verify it with `fastboot getvar gbl-chainload_build`.
 Different host eject implementations need not send START STOP UNIT;
 the keys remain the explicit local exit path.
+
+## Device-validation sequence
+
+The 2026-11-18 fairlady test covered exact-name `boot_a` enumeration,
+capacity and write protection, plus repeated RAM/partition switching and
+Fastboot resume. It did not complete the reference hash comparison below;
+use the full sequence for new devices or partition geometries.
+
+1. Keep the installed, working EFISP and its slot selection unchanged.
+   Package the experimental base with the complete overlay of the exact
+   device package already confirmed to boot; preserve its cached ABL,
+   profile and manifest bytes. Do not infer the right profile from a filename.
+2. Manually stage that complete package and enter GBL Fastboot. First run
+   the RAM disk without a partition argument, inspect `README.TXT`, exit,
+   and confirm that the same Fastboot build responds again. This is still
+   needed even though initial RAM-disk enumeration was observed earlier.
+3. Only then export one explicitly named partition, initially `boot_a`.
+   Check the new host device's USB identity, serial beginning `GBLRO-`,
+   reported capacity and read-only flag. Do not assume a fixed `/dev/sdX`,
+   try to mount a raw boot image, or accept a formatting prompt.
+4. Read its bytes into a regular host file and compare size and SHA-256
+   with a full-partition read obtained read-only from Android or recovery.
+   A shorter flashable image is not an equivalent reference unless the
+   comparison is explicitly restricted to the same byte range. Do not
+   send write commands to a real partition to test write rejection.
+5. Eject or use a volume key to return to Fastboot, confirm a command works,
+   then repeat the RAM-disk/partition transition without a device reboot.
+   Stop on a missing device, transfer error or failure to resume Fastboot.
+
+These steps require explicit user coordination. Host lifecycle simulations
+do not establish that the Qualcomm controller actually resumes Fastboot on
+the device, and this work does not attempt writable MSC or USB Host mode.
 
 RAM staging and this MSC backend do not make the entire firmware boot
 chain read-only. Existing early initialization, logging and boot metadata
@@ -166,6 +212,10 @@ delayed cancellation, reset recovery, eject completion, allocation failures,
 failed controller shutdown, and bounded Fastboot ACK waiting. `fsck.fat -n`
 also checks the generated image when installed. A clean source copy checks
 that the Fastboot integration patch applies and reverses.
+The harness also alternates RAM and partition media over 15 MSC sessions,
+covering eject, an initial detach followed by attach/detach, Volume Up,
+Volume Down and Escape exits while checking DMA and media cleanup. Both
+the default command guard and opt-in command path are compiled and tested.
 
 These are simulated protocol and build checks, not proof that a particular
 phone enumerates MSC correctly. No device commands run as part of the test.
@@ -187,7 +237,10 @@ before the fix; removing those EP0 clear calls and using one OUT-direction
 STALL for rejected requests passes the enumeration and recovery tests.
 After the EP0 fix, the host detected the RAM test on 2026-11-18 at 12:43
 (Asia/Shanghai): `usb-storage`, 480 Mbps, 2048 sectors of 512 bytes, FAT and
-label `GBL RAMDISK`, with `Write Protect is on`. That establishes RAM-disk
-enumeration and host metadata reads, not partition export, write rejection
-under every host, or the complete return-to-Fastboot lifecycle. The partition
-backend and those remaining cases still need user-coordinated stage tests.
+label `GBL RAMDISK`, with `Write Protect is on`. That established RAM-disk
+enumeration and host metadata reads. On the same fairlady device, a
+2026-11-18 coordinated test exported `boot_a` as a 96 MiB write-protected
+disk, confirmed it was the boot image, and repeatedly switched between RAM
+and partition media with Fastboot resume. This does not establish write
+rejection for every host, every partition geometry, or other devices; those
+cases still need coordinated stage tests.

@@ -236,7 +236,12 @@ fastboot oem boot-nodtbo
 在 GBL Fastboot 中执行 `fastboot oem usb-msc`，USB 会切换为包含
 `README.TXT` 的 **1 MiB 只读 FAT12 内存盘**，默认不导出内部任何分区
 或已 stage 的镜像。普通构建禁用指定分区导出；其只读后端已通过主机
-测试，仍待实机验证。不自动选槽、不导出整盘，所有主机写入均被拒绝。
+测试，并已在 fairlady 上实机验证 `boot_a` 只读导出及反复切换/Fastboot
+恢复；其他机型和分区几何仍未验证。不自动选槽、不导出整盘，所有主机
+写入均被拒绝。
+需要协同验证分区导出时，两套构建入口均接受
+`--experimental-usb-msc-partition-export`；启用后的构建标识和默认文件名
+带 `-msc-partitions`，不会启用主机写入。
 MSC 工作期间 Fastboot 暂时不可用；
 弹出磁盘、按音量键或断开线缆后，会尝试恢复同一次 Fastboot 会话。
 默认启动 Android 的策略不变，不通过这个接口提供可写 payload 盘。

@@ -236,9 +236,13 @@ The older [binary-patch helper](scripts/gbl-fastboot-boot-fix.py) targets specif
 In GBL Fastboot, `fastboot oem usb-msc` switches USB to a **read-only 1 MiB
 FAT12 RAM disk** containing `README.TXT`. No internal partitions or staged
 images are exported. Named-partition export is disabled in normal builds;
-its read-only backend has host coverage but still needs device validation.
-There is no automatic slot selection or whole-disk export; all host writes
-are rejected.
+its read-only backend has host coverage and a fairlady `boot_a` device test,
+including repeated RAM/partition switching and Fastboot resume. Other
+devices and partition geometries remain unverified. There is no automatic
+slot selection or whole-disk export; all host writes are rejected.
+For coordinated partition-export testing, both build entries accept
+`--experimental-usb-msc-partition-export`; enabled build names and default
+output filenames gain `-msc-partitions`. This does not enable host writes.
 Fastboot is unavailable while
 MSC is active; eject the disk, press a volume key, or disconnect the cable
 to attempt to return to the same Fastboot session. Normal Android startup

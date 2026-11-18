@@ -50,6 +50,18 @@ STATIC UINTN mBlockReads;
 STATIC EFI_STATUS mBlockReadStatus;
 STATIC BOOLEAN mChangeMediaDuringRead;
 STATIC BOOLEAN mUnlocked;
+STATIC EFI_SYSTEM_TABLE mSystemTable;
+STATIC EFI_SIMPLE_TEXT_INPUT_PROTOCOL mConsole;
+STATIC UINTN mStartCalls;
+STATIC UINTN mKeyDelivered;
+typedef enum {
+  TestExitEject,
+  TestExitDetach,
+  TestExitUp,
+  TestExitDown,
+  TestExitEscape
+} TEST_EXIT_MODE;
+STATIC TEST_EXIT_MODE mExitMode;
 
 BOOLEAN IsUnlocked (VOID) { return mUnlocked; }
 
@@ -204,6 +216,10 @@ STATIC EFI_STATUS TestRamRead (VOID *Context, UINT64 Offset, VOID *Buffer, UINTN
 STATIC EFI_STATUS EFIAPI StartController (EFI_USBFN_IO_PROTOCOL *Usb) {
   assert (Usb == &mUsb && !mControllerActive);
   mControllerActive = TRUE;
+  mStartCalls++;
+  mRunStep = 0;
+  mRunCommand = 0;
+  mEventCalls = 0;
   return EFI_SUCCESS;
 }
 
@@ -338,6 +354,11 @@ STATIC EFI_STATUS EFIAPI EventHandler (EFI_USBFN_IO_PROTOCOL *Usb, EFI_USBFN_MES
   UINT8 *Cbw;
   assert (Usb == &mUsb && *Size == sizeof (*Payload));
   assert (++mEventCalls < 150);
+  if (mExitMode == TestExitDetach) {
+    *Message = mRunStep == 1 ? EfiUsbMsgBusEventAttach : EfiUsbMsgBusEventDetach;
+    mRunStep++;
+    return EFI_SUCCESS;
+  }
   if (mRunStep == 0) {
     *Message = EfiUsbMsgBusEventSpeed;
     Payload->ubs = UsbBusSpeedHigh;
@@ -411,6 +432,17 @@ STATIC EFI_STATUS HighStart (USB_DEVICE_DESCRIPTOR_SET *Descriptors) {
   return EFI_SUCCESS;
 }
 
+STATIC EFI_STATUS EFIAPI ReadKeyStroke (EFI_SIMPLE_TEXT_INPUT_PROTOCOL *Console,
+                                       EFI_INPUT_KEY *Key) {
+  assert (Console == &mConsole);
+  if (mExitMode < TestExitUp || mRunCommand < 4) return EFI_NOT_READY;
+  assert (mKeyDelivered++ == 0);
+  Key->UnicodeChar = 0;
+  Key->ScanCode = mExitMode == TestExitUp ? SCAN_UP
+                  : (mExitMode == TestExitDown ? SCAN_DOWN : SCAN_ESC);
+  return EFI_SUCCESS;
+}
+
 FastbootDeviceData *GetFastbootDeviceData (VOID) { return &mFastboot; }
 VOID FastbootRegister (CONST CHAR8 *Prefix, VOID (*Handler)(CONST CHAR8 *, VOID *, UINT32)) {
   assert (strcmp (Prefix, "oem usb-msc") == 0);
@@ -451,6 +483,14 @@ STATIC VOID ResetMocks (VOID) {
   mHighUsb.StartEx = HighStart;
   mFastboot.UsbDeviceProtocol = &mHighUsb;
   mControllerActive = FALSE;
+  mStartCalls = 0;
+  mExitMode = TestExitEject;
+  mKeyDelivered = 0;
+  memset (&mSystemTable, 0, sizeof (mSystemTable));
+  memset (&mConsole, 0, sizeof (mConsole));
+  mConsole.ReadKeyStroke = ReadKeyStroke;
+  mSystemTable.ConIn = &mConsole;
+  gST = NULL;
   mAllocationAttempts = 0;
   mFailAllocation = 0;
   mStopCalls = 0;
@@ -1052,6 +1092,44 @@ STATIC VOID LifecycleTests (VOID) {
   ResetMocks ();
 }
 
+STATIC VOID RepeatedSessionTests (VOID) {
+  BOOLEAN Released;
+  TEST_EXIT_MODE ExitMode;
+  UINTN Cycle;
+  UINTN Index;
+  UINTN Sessions = 0;
+
+  ResetMocks ();
+  for (ExitMode = TestExitEject; ExitMode <= TestExitEscape; ExitMode++) {
+    for (Cycle = 0; Cycle < 3; Cycle++) {
+      mExitMode = ExitMode;
+      mKeyDelivered = 0;
+      gST = &mSystemTable;
+      assert (GblUsbMscPrepare (Cycle == 1 ? "boot_a" : NULL) == EFI_SUCCESS);
+      assert (GblUsbMscRun (&Released) == EFI_SUCCESS && Released);
+      Sessions++;
+      assert (mStartCalls == Sessions && mStopCalls == Sessions);
+      assert (!mControllerActive && !mMscPrepared && mPreparedMedia.Context == NULL);
+      if (ExitMode == TestExitDetach) {
+        assert (mRunStep == 3 && mRunCommand == 0 && mKeyDelivered == 0);
+      } else if (ExitMode == TestExitEject) {
+        assert (mRunCommand == 5 && mKeyDelivered == 0);
+      } else {
+        assert (mRunCommand == 4 && mKeyDelivered == 1);
+      }
+      for (Index = 0; Index < ARRAY_SIZE (mAllocations); Index++) {
+        assert (mAllocations[Index] == NULL);
+      }
+      for (Index = 0; Index < ARRAY_SIZE (mDriverPending); Index++) {
+        assert (!mDriverPending[Index]);
+      }
+      assert (GblUsbMscRun (&Released) == EFI_NOT_READY && Released);
+    }
+  }
+  assert (Sessions == 15 && mBlockReads != 0);
+  ResetMocks ();
+}
+
 STATIC VOID CommandTests (VOID) {
   ResetMocks ();
   GblUsbMscRegisterCommands ();
@@ -1093,7 +1171,8 @@ int main (int argc, char **argv) {
   PartitionTransportTests ();
   PartitionCommandTests ();
   LifecycleTests ();
+  RepeatedSessionTests ();
   CommandTests ();
-  puts ("ok USB MSC: read-only RAM/partitions, 4K alignment, 64-bit capacity, Qualcomm EP0, SCSI/BOT, reset recovery, DMA lifetime, OOM and Fastboot ACK");
+  puts ("ok USB MSC: read-only RAM/partitions, 4K alignment, 64-bit capacity, Qualcomm EP0, SCSI/BOT, repeated eject/detach/key exits, reset recovery, DMA lifetime, OOM and Fastboot ACK");
   return 0;
 }

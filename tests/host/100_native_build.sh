@@ -107,6 +107,14 @@ grep -qx 'native --release --auto --debug --verbose --output dist/gbl-chainload-
 [[ -f dist/gbl-chainload-auto-debug-verbose.efi && ! -d dist/host && ! -d dist/recovery ]]
 [[ "$(cat Build/unixnu/sentinel)" == keep ]]
 
+bash scripts/build.sh --experimental-usb-msc-partition-export --no-recovery --no-host
+grep -qx 'native --release --experimental-usb-msc-partition-export --output dist/gbl-chainload-msc-partitions.efi' "$MOCK_LOG"
+[[ -f dist/gbl-chainload-msc-partitions.efi && ! -d dist/host && ! -d dist/recovery ]]
+bash scripts/build.sh --auto --debug --verbose --experimental-usb-msc-partition-export --no-recovery --no-host
+grep -qx 'native --release --auto --debug --verbose --experimental-usb-msc-partition-export --output dist/gbl-chainload-auto-debug-verbose-msc-partitions.efi' "$MOCK_LOG"
+[[ -f dist/gbl-chainload-auto-debug-verbose-msc-partitions.efi ]]
+[[ "$(cat Build/unixnu/sentinel)" == keep ]]
+
 NDK_FIXTURE="$TMP/Android NDK"
 mkdir -p "$NDK_FIXTURE/toolchains/llvm/prebuilt/linux-x86_64/bin"
 cp bin/zig "$NDK_FIXTURE/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang"

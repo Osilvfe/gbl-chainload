@@ -32,6 +32,23 @@ echo "== building dist/gbl-chainload.efi =="
 ./scripts/build.sh --no-recovery --no-host
 test -f dist/gbl-chainload.efi || { echo "FAIL: dist/gbl-chainload.efi missing"; exit 1; }
 
+echo "== building opt-in read-only partition-export firmware =="
+./scripts/build.sh --experimental-usb-msc-partition-export --no-recovery --no-host
+test -f dist/gbl-chainload-msc-partitions.efi \
+  || { echo "FAIL: dist/gbl-chainload-msc-partitions.efi missing"; exit 1; }
+if ! grep -aFq 'partition export is disabled in this build' dist/gbl-chainload.efi; then
+  echo 'FAIL: normal firmware lost the partition-export guard' >&2
+  exit 1
+fi
+if grep -aFq 'partition export is disabled in this build' dist/gbl-chainload-msc-partitions.efi; then
+  echo 'FAIL: experimental firmware still has the disabled-export guard' >&2
+  exit 1
+fi
+if ! grep -aFq 'gbl-chainload-msc-partitions' dist/gbl-chainload-msc-partitions.efi; then
+  echo 'FAIL: experimental firmware build identity is missing' >&2
+  exit 1
+fi
+
 
 # ── VERBOSE compile-strip verification ────────────────────────────────────
 # VERBOSE(fmt, ...) compile-strips to a no-op under GBL_VERBOSE=0, so the
