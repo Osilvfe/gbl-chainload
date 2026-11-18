@@ -221,7 +221,7 @@
   #  - -fno-stack-protector: Ubuntu gcc default-on stack-protector breaks -nostdlib
   # Force DWARF4: Ubuntu 22.04 binutils-aarch64-linux-gnu (ld 2.38) does not
   # understand DWARF5 FORM 0x23. Clang 14 on this image defaults to DWARF5.
-  GCC:*_*_AARCH64_CC_FLAGS = -gdwarf-4 -D__FORTIFY_SOURCE -fno-stack-protector -Wno-unused-but-set-variable -Wno-unused-parameter -Wno-error=unused-function -Wno-error=array-parameter -DGBL_EXPERIMENTAL_FASTBOOT_CMDS=1
+  GCC:*_*_AARCH64_CC_FLAGS = -gdwarf-4 -D__FORTIFY_SOURCE -fno-stack-protector -Wno-unused-but-set-variable -Wno-unused-parameter -Wno-error=unused-function -Wno-error=array-parameter -DGBL_EXPERIMENTAL_FASTBOOT_CMDS=1 -DGBL_USB_MSC=1
 
   !if $(VERIFIED_BOOT_LE)
       GCC:*_*_*_CC_FLAGS = -DVERIFIED_BOOT_LE
