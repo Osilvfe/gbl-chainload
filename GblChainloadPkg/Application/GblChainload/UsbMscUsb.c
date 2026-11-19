@@ -61,8 +61,10 @@ typedef struct {
 
 typedef struct {
   EFI_USBFN_IO_PROTOCOL *Usb;
-  GBL_MSC_MEDIA Media;
-  GBL_MSC_BOT Bot;
+  GBL_MSC_MEDIA Media[GBL_MSC_MAX_LUNS];
+  GBL_MSC_BOT Bot[GBL_MSC_MAX_LUNS];
+  UINT8 LunCount;
+  UINT8 Lun;
   MSC_TRANSFER Transfers[4];
   MSC_BULK_STATE BulkState;
   MSC_CONTROL_STATE ControlState;
@@ -109,11 +111,22 @@ typedef struct {
   EFI_USB_SUPERSPEED_DEVICE_INFO SsDeviceInfo;
 } MSC_USB;
 
+#define ACTIVE_BOT(Msc) (&(Msc)->Bot[(Msc)->Lun])
+#define ACTIVE_MEDIA(Msc) (&(Msc)->Media[(Msc)->Lun])
+
+STATIC UINT32
+ReadCbwLe32 (IN CONST UINT8 *Bytes)
+{
+  return (UINT32)Bytes[0] | ((UINT32)Bytes[1] << 8) |
+         ((UINT32)Bytes[2] << 16) | ((UINT32)Bytes[3] << 24);
+}
+
 STATIC UINT16 mMscVendor;
 STATIC UINT16 mMscProduct;
 STATIC UINTN mMscTransferLimit;
 STATIC BOOLEAN mMscPrepared;
-STATIC GBL_MSC_MEDIA mPreparedMedia;
+STATIC GBL_MSC_MEDIA mPreparedMedia[GBL_MSC_MAX_LUNS];
+STATIC UINT8 mPreparedLunCount;
 
 STATIC EFI_STATUS QueueCbw (IN OUT MSC_USB *Msc);
 STATIC EFI_STATUS QueueCsw (IN OUT MSC_USB *Msc);
@@ -121,8 +134,51 @@ STATIC EFI_STATUS QueueCsw (IN OUT MSC_USB *Msc);
 VOID
 GblUsbMscCancel (VOID)
 {
+  UINTN Index;
+
   mMscPrepared = FALSE;
-  GblMscMediaClose (&mPreparedMedia);
+  for (Index = 0; Index < GBL_MSC_MAX_LUNS; Index++) {
+    GblMscMediaClose (&mPreparedMedia[Index]);
+  }
+  mPreparedLunCount = 0;
+}
+
+STATIC EFI_STATUS
+PrepareMediaSpec (IN CONST CHAR8 *Spec)
+{
+  CONST CHAR8 *Start = Spec;
+  CONST CHAR8 *End;
+  CHAR8 Name[GBL_MSC_NAME_SIZE];
+  UINTN Length;
+  UINT8 Count = 0;
+  EFI_STATUS Status;
+
+  while (*Start != 0) {
+    End = Start;
+    while (*End != 0 && *End != ',') {
+      End++;
+    }
+    Length = (UINTN)(End - Start);
+    if (Length == 0 || Length >= GBL_MSC_NAME_SIZE || Count >= GBL_MSC_MAX_LUNS) {
+      return EFI_INVALID_PARAMETER;
+    }
+    CopyMem (Name, Start, Length);
+    Name[Length] = 0;
+    Status = GblMscMediaOpen (Name, &mPreparedMedia[Count]);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+    Count++;
+    if (*End == 0) {
+      break;
+    }
+    Start = End + 1;
+    if (*Start == 0) {
+      return EFI_INVALID_PARAMETER;
+    }
+  }
+  mPreparedLunCount = Count;
+  return EFI_SUCCESS;
 }
 
 EFI_STATUS
@@ -159,8 +215,9 @@ GblUsbMscPrepare (IN CONST CHAR8 *Partition)
   }
   mMscTransferLimit = MIN (Limit, MSC_BULK_BUFFER) & ~(UINTN)1023;
   if (Partition != NULL && Partition[0] != 0) {
-    Status = GblMscMediaOpen (Partition, &mPreparedMedia);
+    Status = PrepareMediaSpec (Partition);
     if (EFI_ERROR (Status)) {
+      GblUsbMscCancel ();
       return Status;
     }
   }
@@ -307,7 +364,7 @@ STATIC EFI_STATUS
 QueueCsw (IN OUT MSC_USB *Msc)
 {
   Msc->BulkState = MscSendCsw;
-  GblMscBotCsw (&Msc->Bot, Msc->ReadOffset, Msc->Transfers[3].Buffer);
+  GblMscBotCsw (ACTIVE_BOT (Msc), Msc->ReadOffset, Msc->Transfers[3].Buffer);
   return QueueTransfer (Msc, 3, GBL_MSC_CSW_SIZE);
 }
 
@@ -315,20 +372,21 @@ STATIC EFI_STATUS
 QueueRead (IN OUT MSC_USB *Msc)
 {
   EFI_STATUS Status;
-  UINTN Length = MIN ((UINTN)(Msc->Bot.InLength - Msc->ReadOffset), Msc->TransferLimit);
+  GBL_MSC_BOT *Bot = ACTIVE_BOT (Msc);
+  UINTN Length = MIN ((UINTN)(Bot->InLength - Msc->ReadOffset), Msc->TransferLimit);
 
   if (Length == 0) {
-    if (Msc->Bot.HostLength > Msc->Bot.InLength &&
-        (Msc->Bot.InLength % Msc->BulkPacket) == 0) {
+    if (Bot->HostLength > Bot->InLength &&
+        (Bot->InLength % Msc->BulkPacket) == 0) {
       Msc->BulkState = MscReadZlp;
       return QueueTransfer (Msc, 3, 0);
     }
     return QueueCsw (Msc);
   }
-  Status = GblMscBotRead (&Msc->Bot, Msc->ReadOffset, Msc->Transfers[3].Buffer, Length);
+  Status = GblMscBotRead (Bot, Msc->ReadOffset, Msc->Transfers[3].Buffer, Length);
   if (EFI_ERROR (Status)) {
-    if (Msc->Bot.Status != 2) {
-      Msc->Bot.Status = 1;
+    if (Bot->Status != 2) {
+      Bot->Status = 1;
     }
     Msc->BulkState = MscWaitClear;
     return SetHalt (Msc, 3, TRUE);
@@ -341,9 +399,31 @@ STATIC EFI_STATUS
 StartCommand (IN OUT MSC_USB *Msc, IN UINTN Size)
 {
   EFI_STATUS Status;
+  GBL_MSC_BOT *Bot;
+  UINT8 Lun;
 
   Msc->ReadOffset = 0;
-  Status = GblMscBotBegin (&Msc->Bot, Msc->Transfers[2].Buffer, Size);
+  Lun = Size == GBL_MSC_CBW_SIZE
+        ? ((CONST UINT8 *)Msc->Transfers[2].Buffer)[13] : 0;
+  if (Lun >= Msc->LunCount) {
+    Msc->Lun = 0;
+    Bot = &Msc->Bot[0];
+    Bot->Tag = ReadCbwLe32 ((CONST UINT8 *)Msc->Transfers[2].Buffer + 4);
+    Bot->HostLength = ReadCbwLe32 ((CONST UINT8 *)Msc->Transfers[2].Buffer + 8);
+    Bot->Status = 1;
+    Bot->SenseKey = 5;
+    Bot->Asc = 0x25;
+    Bot->Ascq = 0;
+    Bot->InLength = 0;
+    Bot->OutLength = 0;
+    Bot->FromDisk = FALSE;
+    Bot->HaltIn = FALSE;
+    Bot->HaltOut = FALSE;
+    return QueueCsw (Msc);
+  }
+  Msc->Lun = Lun;
+  Bot = ACTIVE_BOT (Msc);
+  Status = GblMscBotBegin (Bot, Msc->Transfers[2].Buffer, Size);
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_INFO, "USB MSC: invalid CBW, reset recovery required\n"));
     Msc->RecoveryRequired = TRUE;
@@ -356,22 +436,22 @@ StartCommand (IN OUT MSC_USB *Msc, IN UINTN Size)
     }
     return SetHalt (Msc, 3, TRUE);
   }
-  if (Msc->Bot.HaltOut) {
+  if (Bot->HaltOut) {
     Status = SetHalt (Msc, 2, TRUE);
     if (EFI_ERROR (Status)) {
       return Status;
     }
   }
-  if (Msc->Bot.HaltIn) {
+  if (Bot->HaltIn) {
     Msc->BulkState = MscWaitClear;
     return SetHalt (Msc, 3, TRUE);
   }
-  if (Msc->Bot.OutLength != 0) {
-    Msc->OutRemaining = Msc->Bot.OutLength;
+  if (Bot->OutLength != 0) {
+    Msc->OutRemaining = Bot->OutLength;
     Msc->BulkState = MscDiscardData;
     return QueueTransfer (Msc, 2, MIN ((UINTN)Msc->OutRemaining, Msc->TransferLimit));
   }
-  if (Msc->Bot.InLength != 0) {
+  if (Bot->InLength != 0) {
     return QueueRead (Msc);
   }
   return QueueCsw (Msc);
@@ -436,9 +516,11 @@ GetDescriptor (IN OUT MSC_USB *Msc)
     if (Index == 1) {
       Text = "GBL";
     } else if (Index == 2) {
-      Text = Msc->Media.IsPartition ? "GBL read-only partition" : "GBL read-only RAM disk";
+      Text = Msc->LunCount > 1 ? "GBL read-only multi-LUN"
+             : (Msc->Media[0].IsPartition
+                ? "GBL read-only partition" : "GBL read-only RAM disk");
     } else if (Index == 3) {
-      Text = Msc->Media.Serial;
+      Text = Msc->Media[0].Serial;
     } else {
       return StallControl (Msc);
     }
@@ -543,7 +625,8 @@ HandleSetup (IN OUT MSC_USB *Msc)
   }
   if (Msc->Configured && Request->Index == 0 && Request->Value == 0) {
     if (Request->RequestType == 0xa1 && Request->Request == 0xfe && Request->Length == 1) {
-      Buffer[0] = 0;
+      /* GET MAX LUN returns the highest LUN index, not the LUN count. */
+      Buffer[0] = Msc->LunCount > 0 ? (UINT8)(Msc->LunCount - 1) : 0;
       return ControlReply (Msc, Buffer, 1);
     }
     if (Request->RequestType == 0x21 && Request->Request == 0xff && Request->Length == 0) {
@@ -617,7 +700,7 @@ ControlComplete (IN OUT MSC_USB *Msc, IN UINTN Slot)
   }
   if (Msc->RecoveryRequired && Msc->ResetSeen && Msc->ClearMask == 3 && !Msc->ResetPending) {
     Msc->RecoveryRequired = FALSE;
-    Msc->Bot.NeedsReset = FALSE;
+    ACTIVE_BOT (Msc)->NeedsReset = FALSE;
     return QueueCbw (Msc);
   }
   if (Msc->BulkState == MscWaitReset && !Msc->RecoveryRequired && !Msc->ResetPending) {
@@ -631,6 +714,7 @@ TransferComplete (IN OUT MSC_USB *Msc, IN EFI_USBFN_TRANSFER_RESULT *Result)
 {
   UINTN Slot;
   MSC_TRANSFER *Transfer;
+  GBL_MSC_BOT *Bot = ACTIVE_BOT (Msc);
 
   if (Result->EndpointIndex > 1 || Result->EndpointDirection > EfiUsbEndpointDirectionHostIn) {
     return EFI_PROTOCOL_ERROR;
@@ -668,7 +752,7 @@ TransferComplete (IN OUT MSC_USB *Msc, IN EFI_USBFN_TRANSFER_RESULT *Result)
     if (Slot == 3 && Msc->BulkState == MscReadData) {
       Msc->ReadOffset += (UINT32)Result->BytesTransferred;
     }
-    Msc->Bot.Status = 2;
+    Bot->Status = 2;
     return QueueCsw (Msc);
   }
   if (Slot == 2 && Msc->BulkState == MscDiscardData) {
@@ -686,15 +770,15 @@ TransferComplete (IN OUT MSC_USB *Msc, IN EFI_USBFN_TRANSFER_RESULT *Result)
     return QueueCsw (Msc);
   }
   if (Slot == 3 && Msc->BulkState == MscSendCsw) {
-    if (Msc->Bot.Status == 2) {
+    if (Bot->Status == 2) {
       Msc->RecoveryRequired = TRUE;
       Msc->ResetSeen = FALSE;
       Msc->ClearMask = 0;
-      Msc->Bot.NeedsReset = TRUE;
+      Bot->NeedsReset = TRUE;
       Msc->BulkState = MscWaitReset;
       return EFI_SUCCESS;
     }
-    if (Msc->Bot.EjectRequested && Msc->Bot.Status == 0) {
+    if (Bot->EjectRequested && Bot->Status == 0) {
       Msc->ExitRequested = TRUE;
       return EFI_SUCCESS;
     }
@@ -710,6 +794,7 @@ AdvancePending (IN OUT MSC_USB *Msc)
   BOOLEAN MediaPresent;
   BOOLEAN PreventRemoval;
   UINTN Slot;
+  UINTN LunIndex;
 
   if (Msc->SetupPending && !Msc->Transfers[0].Pending && !Msc->Transfers[1].Pending) {
     Status = HandleSetup (Msc);
@@ -726,11 +811,15 @@ AdvancePending (IN OUT MSC_USB *Msc)
     }
   }
   if (Msc->ResetPending && !Msc->Transfers[2].Pending && !Msc->Transfers[3].Pending) {
-    MediaPresent = Msc->Bot.MediaPresent;
-    PreventRemoval = Msc->Bot.PreventRemoval;
-    GblMscBotInitMedia (&Msc->Bot, &Msc->Media);
-    Msc->Bot.MediaPresent = MediaPresent;
-    Msc->Bot.PreventRemoval = PreventRemoval;
+    for (LunIndex = 0; LunIndex < Msc->LunCount; LunIndex++) {
+      MediaPresent = Msc->Bot[LunIndex].MediaPresent;
+      PreventRemoval = Msc->Bot[LunIndex].PreventRemoval;
+      GblMscBotInitMedia (&Msc->Bot[LunIndex], &Msc->Media[LunIndex]);
+      Msc->Bot[LunIndex].LunCount = Msc->LunCount;
+      Msc->Bot[LunIndex].MediaPresent = MediaPresent;
+      Msc->Bot[LunIndex].PreventRemoval = PreventRemoval;
+    }
+    Msc->Lun = 0;
     Msc->ResetPending = FALSE;
     Msc->ReadOffset = 0;
     Msc->OutRemaining = 0;
@@ -833,6 +922,7 @@ GblUsbMscRun (OUT BOOLEAN *Released)
   EFI_USBFN_MESSAGE_PAYLOAD Payload;
   UINTN Size;
   UINTN Slot;
+  UINTN LunIndex;
   EFI_INPUT_KEY Key;
   BOOLEAN DisableZlp = FALSE;
 
@@ -846,25 +936,36 @@ GblUsbMscRun (OUT BOOLEAN *Released)
     GblUsbMscCancel ();
     return EFI_OUT_OF_RESOURCES;
   }
-  Msc->Media = mPreparedMedia;
-  ZeroMem (&mPreparedMedia, sizeof (mPreparedMedia));
+  Msc->LunCount = mPreparedLunCount;
+  for (LunIndex = 0; LunIndex < GBL_MSC_MAX_LUNS; LunIndex++) {
+    Msc->Media[LunIndex] = mPreparedMedia[LunIndex];
+    ZeroMem (&mPreparedMedia[LunIndex], sizeof (mPreparedMedia[LunIndex]));
+  }
+  mPreparedLunCount = 0;
   Msc->TransferLimit = mMscTransferLimit;
   Msc->BulkPacket = 512;
   Msc->ControlPacket = 64;
   Status = gBS->LocateProtocol (&gEfiUsbfnIoProtocolGuid, NULL, (VOID **)&Msc->Usb);
   if (EFI_ERROR (Status)) {
-    GblMscMediaClose (&Msc->Media);
+    for (LunIndex = 0; LunIndex < GBL_MSC_MAX_LUNS; LunIndex++) {
+      GblMscMediaClose (&Msc->Media[LunIndex]);
+    }
     FreePool (Msc);
     return Status;
   }
-  if (Msc->Media.Read == NULL) {
-    Status = GblMscMediaOpen (NULL, &Msc->Media);
+  if (Msc->LunCount == 0) {
+    Status = GblMscMediaOpen (NULL, &Msc->Media[0]);
     if (EFI_ERROR (Status)) {
       FreePool (Msc);
       return Status;
     }
+    Msc->LunCount = 1;
   }
-  GblMscBotInitMedia (&Msc->Bot, &Msc->Media);
+  for (LunIndex = 0; LunIndex < Msc->LunCount; LunIndex++) {
+    GblMscBotInitMedia (&Msc->Bot[LunIndex], &Msc->Media[LunIndex]);
+    Msc->Bot[LunIndex].LunCount = Msc->LunCount;
+  }
+  Msc->Lun = 0;
   InitDescriptors (Msc);
   *Released = FALSE;
   Status = Msc->Usb->StartController (Msc->Usb);
@@ -903,12 +1004,19 @@ GblUsbMscRun (OUT BOOLEAN *Released)
   } else {
     Status = EFI_SUCCESS;
   }
-  Print (L"GBL USB Mass Storage: read-only %a (%Lu bytes)\n"
-         L"All host writes are rejected.\n"
-         L"Eject the disk or press a volume key to return to Fastboot.\n",
-         Msc->Media.Name, Msc->Media.Size);
-  DEBUG ((DEBUG_INFO, "USB MSC: started, read-only %a, VID=%04x PID=%04x\n",
-          Msc->Media.Name, mMscVendor, mMscProduct));
+  if (Msc->LunCount == 1) {
+    Print (L"GBL USB Mass Storage: read-only %a (%Lu bytes)\n"
+           L"All host writes are rejected.\n"
+           L"Eject the disk or press a volume key to return to Fastboot.\n",
+           Msc->Media[0].Name, Msc->Media[0].Size);
+  } else {
+    Print (L"GBL USB Mass Storage: read-only, %u LUNs\n"
+           L"All host writes are rejected.\n"
+           L"Eject the disks or press a volume key to return to Fastboot.\n",
+           Msc->LunCount);
+  }
+  DEBUG ((DEBUG_INFO, "USB MSC: started, %u read-only LUN(s), VID=%04x PID=%04x\n",
+          Msc->LunCount, mMscVendor, mMscProduct));
   while (!Msc->ExitRequested) {
     Size = sizeof (Payload);
     ZeroMem (&Payload, sizeof (Payload));
@@ -945,7 +1053,9 @@ Stop:
       Msc->Usb->FreeTransferBuffer (Msc->Usb, Msc->Transfers[Slot].Buffer);
     }
   }
-  GblMscMediaClose (&Msc->Media);
+  for (LunIndex = 0; LunIndex < GBL_MSC_MAX_LUNS; LunIndex++) {
+    GblMscMediaClose (&Msc->Media[LunIndex]);
+  }
   FreePool (Msc);
   return Status;
 }

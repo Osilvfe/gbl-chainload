@@ -511,7 +511,7 @@ STATIC VOID ResetMocks (VOID) {
   mBlockReadStatus = EFI_SUCCESS;
   mChangeMediaDuringRead = FALSE;
   mUnlocked = TRUE;
-  SetPartition (0, "boot_a", 4096, 96U * 1024U * 1024U);
+  SetPartition (0, "boot_a", 512, 96U * 1024U * 1024U);
 }
 
 STATIC VOID InitContext (MSC_USB *Msc) {
@@ -520,15 +520,19 @@ STATIC VOID InitContext (MSC_USB *Msc) {
   assert (GblUsbMscPrepare (NULL) == EFI_SUCCESS);
   memset (Msc, 0, sizeof (*Msc));
   Msc->Usb = &mUsb;
-  Msc->Media.Read = TestRamRead;
-  Msc->Media.Context = mDisk;
-  Msc->Media.Size = sizeof (mDisk);
-  memcpy (Msc->Media.Serial, "GBLRAM0001-MSC", sizeof ("GBLRAM0001-MSC"));
+  Msc->Media[0].Read = TestRamRead;
+  Msc->Media[0].Context = mDisk;
+  Msc->Media[0].Size = sizeof (mDisk);
+  Msc->Media[0].BlockSize = 512;
+  memcpy (Msc->Media[0].Serial, "GBLRAM0001-MSC", sizeof ("GBLRAM0001-MSC"));
+  Msc->LunCount = 1;
+  Msc->Lun = 0;
   Msc->TransferLimit = MSC_BULK_BUFFER;
   Msc->BulkPacket = 512;
   Msc->ControlPacket = 64;
   Msc->SupportsSuperSpeed = TRUE;
-  GblMscBotInitMedia (&Msc->Bot, &Msc->Media);
+  GblMscBotInitMedia (&Msc->Bot[0], &Msc->Media[0]);
+  Msc->Bot[0].LunCount = Msc->LunCount;
   InitDescriptors (Msc);
   for (Slot = 0; Slot < 4; Slot++) Msc->Transfers[Slot].Buffer = mBuffers[Slot];
   mControllerActive = TRUE;
@@ -616,6 +620,23 @@ STATIC VOID CoreTests (VOID) {
   assert (memcmp (Data + 8, "GBL     ", 8) == 0);
   GblMscBotCsw (&Bot, 36, Csw);
   assert (Csw[0] == 'U' && Csw[3] == 'S' && Csw[4] == 0x78 && Csw[8] == 0 && Csw[12] == 0);
+  /* SPC-3 version: hosts gate VPD pages and multi-LUN scans on this byte. */
+  assert (Data[2] == 5 && Data[3] == 2 && Data[4] == 31);
+  MakeCbw (Cbw, 0x12, 6, 36, TRUE);
+  Cbw[16] = 1; Cbw[17] = 0x00; Cbw[18] = 0; Cbw[19] = 36;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 6);
+  assert (GblMscBotRead (&Bot, 0, Data, 6) == EFI_SUCCESS);
+  assert (Data[1] == 0x00 && Data[2] == 0 && Data[3] == 2 && Data[4] == 0x00 && Data[5] == 0x80);
+  GblMscBotCsw (&Bot, 6, Csw);
+  assert (Csw[8] == 30 && Csw[12] == 0);
+  MakeCbw (Cbw, 0x12, 6, 40, TRUE);
+  Cbw[16] = 1; Cbw[17] = 0x80; Cbw[18] = 0; Cbw[19] = 40;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 14);
+  assert (GblMscBotRead (&Bot, 0, Data, 14) == EFI_SUCCESS);
+  assert (Data[1] == 0x80 && Data[2] == 0 && Data[3] == 10);
+  assert (memcmp (Data + 4, "GBLRAM0001", 10) == 0);
+  GblMscBotCsw (&Bot, 14, Csw);
+  assert (Csw[8] == 26 && Csw[12] == 0);
   MakeCbw (Cbw, 0x25, 10, 8, TRUE);
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
   assert (GblMscBotRead (&Bot, 0, Data, 8) == EFI_SUCCESS);
@@ -939,9 +960,9 @@ STATIC VOID PartitionScsiTests (VOID) {
   GBL_MSC_MEDIA Media;
   GBL_MSC_BOT Bot;
   UINT8 Cbw[31];
-  UINT8 Buffer[512];
+  UINT8 Buffer[4096];
   UINT64 Size = 5ULL * 1024 * 1024 * 1024 * 1024;
-  UINT64 Lba = 0x100000001ULL;
+  UINT64 Lba = 0x10000001ULL;
   UINTN Reads;
   UINTN Index;
 
@@ -953,27 +974,40 @@ STATIC VOID PartitionScsiTests (VOID) {
   MakeCbw (Cbw, 0x25, 10, 8, TRUE);
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0);
   assert (GblMscBotRead (&Bot, 0, Buffer, 8) == EFI_SUCCESS);
-  assert (Buffer[0] == 255 && Buffer[1] == 255 && Buffer[2] == 255 && Buffer[3] == 255);
+  assert (Buffer[0] == 0x4f && Buffer[1] == 255 && Buffer[2] == 255 && Buffer[3] == 255);
   MakeCbw (Cbw, 0x9e, 16, 32, TRUE);
   Cbw[16] = 0x10;
   PutBe32 (Cbw + 25, 32);
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 32);
   assert (GblMscBotRead (&Bot, 0, Buffer, 32) == EFI_SUCCESS);
-  assert (Buffer[3] == 2 && Buffer[4] == 0x7f && Buffer[7] == 0xff && Buffer[10] == 2);
+  assert (Buffer[3] == 0 && Buffer[4] == 0x4f && Buffer[7] == 0xff && Buffer[10] == 0x10);
+  MakeCbw (Cbw, 0x23, 10, 12, TRUE);
+  Cbw[23] = 12;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0);
+  assert (GblMscBotRead (&Bot, 0, Buffer, 12) == EFI_SUCCESS);
+  assert (Buffer[3] == 8 && Buffer[9] == 0 && Buffer[10] == 0x10 && Buffer[11] == 0);
+  MakeCbw (Cbw, 0x2f, 10, 0, FALSE);
+  Cbw[23] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0);
+  Cbw[17] = 0xff;
+  Cbw[18] = 0xff;
+  Cbw[19] = 0xff;
+  Cbw[20] = 0xff;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 1 && Bot.Asc == 0x21);
   Cbw[16] = 0x11;
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 1);
-  MakeCbw (Cbw, 0x88, 16, 512, TRUE);
+  MakeCbw (Cbw, 0x88, 16, 4096, TRUE);
   PutBe64 (Cbw + 17, Lba);
   PutBe32 (Cbw + 25, 1);
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0);
-  assert (Bot.DiskOffset == Lba * 512);
+  assert (Bot.DiskOffset == Lba * 4096);
   assert (GblMscBotRead (&Bot, 0, Buffer, sizeof (Buffer)) == EFI_SUCCESS);
-  for (Index = 0; Index < sizeof (Buffer); Index++) assert (Buffer[Index] == PartitionByte (Lba * 512 + Index));
+  for (Index = 0; Index < sizeof (Buffer); Index++) assert (Buffer[Index] == PartitionByte (Lba * 4096 + Index));
   Reads = mBlockReads;
-  PutBe64 (Cbw + 17, Size / 512);
+  PutBe64 (Cbw + 17, Size / 4096);
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 1 && Bot.Asc == 0x21);
   assert (mBlockReads == Reads);
-  MakeCbw (Cbw, 0x8a, 16, 512, FALSE);
+  MakeCbw (Cbw, 0x8a, 16, 4096, FALSE);
   PutBe32 (Cbw + 25, 1);
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 1);
   assert (Bot.SenseKey == 7 && Bot.Asc == 0x27 && mBlockReads == Reads);
@@ -986,23 +1020,28 @@ STATIC VOID PartitionTransportTests (VOID) {
   EFI_USBFN_MESSAGE_PAYLOAD Payload;
 
   InitContext (&Msc);
-  assert (GblMscMediaOpen ("boot_a", &Msc.Media) == EFI_SUCCESS);
-  GblMscBotInitMedia (&Msc.Bot, &Msc.Media);
+  SetPartition (0, "boot_a", 4096, 96U * 1024U * 1024U);
+  assert (GblMscMediaOpen ("boot_a", &Msc.Media[0]) == EFI_SUCCESS);
+  Msc.Media[0].BlockSize = 4096;
+  GblMscBotInitMedia (&Msc.Bot[0], &Msc.Media[0]);
+  Msc.Bot[0].LunCount = 1;
+  Msc.LunCount = 1;
+  Msc.Lun = 0;
   ConfigureContext (&Msc);
-  assert (Msc.Bot.IsPartition && Msc.Bot.DiskSize == 96U * 1024U * 1024U);
+  assert (Msc.Bot[0].IsPartition && Msc.Bot[0].DiskSize == 96U * 1024U * 1024U);
   Payload.ubs = UsbBusSpeedHigh;
   assert (HandleMessage (&Msc, EfiUsbMsgBusEventReset, &Payload) == EFI_SUCCESS);
   assert (CompleteSlot (&Msc, 2, 0, UsbTransferStatusAborted) == EFI_SUCCESS);
-  assert (Msc.Bot.IsPartition && Msc.Bot.DiskSize == Msc.Media.Size);
+  assert (Msc.Bot[0].IsPartition && Msc.Bot[0].DiskSize == Msc.Media[0].Size);
   ConfigureContext (&Msc);
   mBlockReadStatus = EFI_DEVICE_ERROR;
-  MakeCbw (mBuffers[2], 0x28, 10, 512, TRUE); mBuffers[2][23] = 1;
+  MakeCbw (mBuffers[2], 0x28, 10, 4096, TRUE); mBuffers[2][23] = 1;
   assert (CompleteSlot (&Msc, 2, 31, UsbTransferStatusComplete) == EFI_SUCCESS);
   assert (mHalted[3] && Msc.BulkState == MscWaitClear && !mDriverPending[3]);
-  assert (Msc.Bot.Status == 1 && Msc.Bot.SenseKey == 3 && Msc.Bot.Asc == 0x11);
+  assert (Msc.Bot[0].Status == 1 && Msc.Bot[0].SenseKey == 3 && Msc.Bot[0].Asc == 0x11);
   Setup (&Msc, 2, 1, 0, 0x81, 0); FinishControl (&Msc);
   assert (mDriverPending[3] && mDriverLength[3] == 13);
-  assert (mBuffers[3][9] == 2 && mBuffers[3][12] == 1);
+  assert (mBuffers[3][9] == 0x10 && mBuffers[3][12] == 1);
   assert (CompleteSlot (&Msc, 3, 13, UsbTransferStatusComplete) == EFI_SUCCESS);
   MakeCbw (mBuffers[2], 3, 6, 18, TRUE); mBuffers[2][19] = 18;
   assert (CompleteSlot (&Msc, 2, 31, UsbTransferStatusComplete) == EFI_SUCCESS);
@@ -1010,10 +1049,10 @@ STATIC VOID PartitionTransportTests (VOID) {
   assert (CompleteSlot (&Msc, 3, 18, UsbTransferStatusComplete) == EFI_SUCCESS);
   assert (CompleteSlot (&Msc, 3, 13, UsbTransferStatusComplete) == EFI_SUCCESS);
   mBlockReadStatus = EFI_SUCCESS;
-  MakeCbw (mBuffers[2], 0x28, 10, 512, TRUE); mBuffers[2][23] = 1;
+  MakeCbw (mBuffers[2], 0x28, 10, 4096, TRUE); mBuffers[2][23] = 1;
   assert (CompleteSlot (&Msc, 2, 31, UsbTransferStatusComplete) == EFI_SUCCESS);
-  assert (mDriverLength[3] == 512 && mBuffers[3][1] == PartitionByte (1));
-  GblMscMediaClose (&Msc.Media);
+  assert (mDriverLength[3] == 4096 && mBuffers[3][1] == PartitionByte (1));
+  GblMscMediaClose (&Msc.Media[0]);
   ResetMocks ();
 }
 
@@ -1027,7 +1066,7 @@ STATIC VOID PartitionCommandTests (VOID) {
     GblUsbMscRegisterCommands ();
     mCommand (Invalid[Index], NULL, 0);
     assert (mFail && !mAck && !GblUsbMscRequested () && !mMscPrepared);
-    assert (mStopCalls == 0 && mPreparedMedia.Context == NULL);
+    assert (mStopCalls == 0 && mPreparedMedia[0].Context == NULL);
   }
   if (!GBL_USB_MSC_PARTITION_EXPORT) {
     ResetMocks ();
@@ -1035,7 +1074,7 @@ STATIC VOID PartitionCommandTests (VOID) {
     mCommand (" boot_a", NULL, 0);
     assert (mFail && !mAck && !GblUsbMscRequested () && !mMscPrepared);
     assert (mBlockReads == 0 && mStopCalls == 0 && mStalls == 0);
-    assert (mPreparedMedia.Context == NULL);
+    assert (mPreparedMedia[0].Context == NULL);
     ResetMocks ();
     return;
   }
@@ -1047,17 +1086,89 @@ STATIC VOID PartitionCommandTests (VOID) {
   ResetMocks ();
   GblUsbMscRegisterCommands ();
   mCommand (" boot_a ", NULL, 0);
-  assert (mAck && !mFail && GblUsbMscRequested () && mPreparedMedia.IsPartition);
+  assert (mAck && !mFail && GblUsbMscRequested () && mPreparedMedia[0].IsPartition);
   assert (GblUsbMscRun (&Released) == EFI_SUCCESS && Released);
-  assert (mRunCommand == 5 && mBlockReads > 1 && mPreparedMedia.Context == NULL);
+  assert (mRunCommand == 5 && mBlockReads > 1 && mPreparedMedia[0].Context == NULL);
+  ResetMocks ();
+  mPartitionCount = 2;
+  SetPartition (1, "boot_b", 512, 4096);
+  GblUsbMscRegisterCommands ();
+  mCommand (" boot_a,boot_b", NULL, 0);
+  assert (mAck && !mFail && mPreparedLunCount == 2 && mPreparedMedia[1].IsPartition);
+  assert (GblUsbMscRun (&Released) == EFI_SUCCESS && Released);
+  assert (mPreparedMedia[0].Context == NULL && mPreparedMedia[1].Context == NULL);
   ResetMocks ();
   GblUsbMscRegisterCommands ();
   mAckMode = 1;
   mCommand (" boot_a", NULL, 0);
-  assert (mAck && !GblUsbMscRequested () && mPreparedMedia.Context == NULL && !mMscPrepared);
+  assert (mAck && !GblUsbMscRequested () && mPreparedMedia[0].Context == NULL && !mMscPrepared);
   mAckMode = 2;
   mCommand (" boot_a", NULL, 0);
-  assert (!GblUsbMscRequested () && mPreparedMedia.Context == NULL && !mMscPrepared);
+  assert (!GblUsbMscRequested () && mPreparedMedia[0].Context == NULL && !mMscPrepared);
+  ResetMocks ();
+}
+
+STATIC VOID MultiLunTests (VOID) {
+  MSC_USB Msc;
+  GBL_MSC_BOT Bot;
+  UINT8 Cbw[31];
+  UINT8 Data[512];
+
+  InitContext (&Msc);
+  mPartitionCount = 2;
+  SetPartition (1, "boot_b", 512, 4096);
+  assert (GblMscMediaOpen ("boot_b", &Msc.Media[1]) == EFI_SUCCESS);
+  Msc.LunCount = 2;
+  Msc.Lun = 0;
+  Msc.Bot[0].LunCount = 2;
+  GblMscBotInitMedia (&Msc.Bot[1], &Msc.Media[1]);
+  Msc.Bot[1].LunCount = 2;
+  ConfigureContext (&Msc);
+
+  /* GET MAX LUN must report the highest LUN index, not the count. */
+  Setup (&Msc, 0xa1, 0xfe, 0, 0, 1);
+  assert (mDriverLength[1] == 1 && mBuffers[1][0] == 1);
+  FinishControl (&Msc);
+
+  MakeCbw (mBuffers[2], 0x12, 6, 36, TRUE);
+  mBuffers[2][13] = 1;
+  mBuffers[2][19] = 36;
+  assert (CompleteSlot (&Msc, 2, 31, UsbTransferStatusComplete) == EFI_SUCCESS);
+  assert (Msc.Lun == 1 && mDriverPending[3] && mDriverLength[3] == 36);
+  assert (mBuffers[3][0] == 0 && mBuffers[3][1] == 0x80);
+  assert (CompleteSlot (&Msc, 3, 36, UsbTransferStatusComplete) == EFI_SUCCESS);
+  assert (CompleteSlot (&Msc, 3, 13, UsbTransferStatusComplete) == EFI_SUCCESS);
+
+  MakeCbw (mBuffers[2], 0x28, 10, 512, TRUE);
+  mBuffers[2][13] = 1;
+  mBuffers[2][23] = 1;
+  assert (CompleteSlot (&Msc, 2, 31, UsbTransferStatusComplete) == EFI_SUCCESS);
+  assert (Msc.Lun == 1 && mDriverLength[3] == 512);
+  assert (mBuffers[3][0] == PartitionByte (0) && mBuffers[3][1] == PartitionByte (1));
+  assert (CompleteSlot (&Msc, 3, 512, UsbTransferStatusComplete) == EFI_SUCCESS);
+  assert (CompleteSlot (&Msc, 3, 13, UsbTransferStatusComplete) == EFI_SUCCESS);
+
+  GblMscBotInit (&Bot, mDisk, sizeof (mDisk));
+  Bot.LunCount = 4;
+  MakeCbw (Cbw, 0xa0, 12, 36, TRUE);
+  PutBe32 (Cbw + 21, 36);
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0);
+  assert (GblMscBotRead (&Bot, 0, Data, 36) == EFI_SUCCESS);
+  /* SAM-5 peripheral device addressing: bus in byte 0, LUN in byte 1. */
+  assert (Data[3] == 32);
+  assert (Data[4] == 0 && Data[5] == 0 && Data[6] == 0 && Data[7] == 0);
+  assert (Data[12] == 0 && Data[13] == 1 && Data[14] == 0);
+  assert (Data[20] == 0 && Data[21] == 2 && Data[22] == 0);
+  assert (Data[28] == 0 && Data[29] == 3 && Data[30] == 0);
+
+  MakeCbw (Cbw, 0x12, 6, 36, TRUE);
+  Cbw[13] = 4;
+  Cbw[19] = 36;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (Bot.Status == 1 && Bot.SenseKey == 5 && Bot.Asc == 0x25);
+
+  GblMscMediaClose (&Msc.Media[1]);
+  Msc.Media[0].Context = NULL;
   ResetMocks ();
 }
 
@@ -1109,7 +1220,7 @@ STATIC VOID RepeatedSessionTests (VOID) {
       assert (GblUsbMscRun (&Released) == EFI_SUCCESS && Released);
       Sessions++;
       assert (mStartCalls == Sessions && mStopCalls == Sessions);
-      assert (!mControllerActive && !mMscPrepared && mPreparedMedia.Context == NULL);
+      assert (!mControllerActive && !mMscPrepared && mPreparedMedia[0].Context == NULL);
       if (ExitMode == TestExitDetach) {
         assert (mRunStep == 3 && mRunCommand == 0 && mKeyDelivered == 0);
       } else if (ExitMode == TestExitEject) {
@@ -1170,9 +1281,10 @@ int main (int argc, char **argv) {
   PartitionScsiTests ();
   PartitionTransportTests ();
   PartitionCommandTests ();
+  MultiLunTests ();
   LifecycleTests ();
   RepeatedSessionTests ();
   CommandTests ();
-  puts ("ok USB MSC: read-only RAM/partitions, 4K alignment, 64-bit capacity, Qualcomm EP0, SCSI/BOT, repeated eject/detach/key exits, reset recovery, DMA lifetime, OOM and Fastboot ACK");
+  puts ("ok USB MSC: read-only RAM/partitions, multi-LUN REPORT LUNS, 512/4096 logical blocks, 64-bit capacity, VERIFY, Qualcomm EP0, SCSI/BOT reset recovery, repeated exits, DMA lifetime, OOM and Fastboot ACK");
   return 0;
 }

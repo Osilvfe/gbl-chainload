@@ -166,6 +166,7 @@ GblMscMediaOpen (IN CONST CHAR8 *Name, OUT GBL_MSC_MEDIA *Media)
     }
     GblMscMakeDisk (Media->Context);
     Media->Size = GBL_MSC_DISK_SIZE;
+    Media->BlockSize = GBL_MSC_BLOCK_SIZE;
     Media->Read = RamRead;
     CopyMem (Media->Name, "RAM disk", sizeof ("RAM disk"));
     CopyMem (Media->Serial, "GBLRAM0001-MSC", sizeof ("GBLRAM0001-MSC"));
@@ -239,6 +240,7 @@ GblMscMediaOpen (IN CONST CHAR8 *Name, OUT GBL_MSC_MEDIA *Media)
   Partition->LastBlock = BlockMedia->LastBlock;
   Partition->Size = (BlockMedia->LastBlock + 1) * BlockMedia->BlockSize;
   Media->Size = Partition->Size;
+  Media->BlockSize = Partition->BlockSize;
   Media->Read = PartitionRead;
   for (Index = 0; Name[Index] != 0; Index++) {
     Media->Name[Index] = Name[Index];

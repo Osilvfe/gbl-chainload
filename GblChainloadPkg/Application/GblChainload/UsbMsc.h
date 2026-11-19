@@ -12,12 +12,15 @@
 #define GBL_MSC_CBW_SIZE 31U
 #define GBL_MSC_CSW_SIZE 13U
 #define GBL_MSC_NAME_SIZE 37U
+#define GBL_MSC_MAX_LUNS 4U
+#define GBL_MSC_SPEC_SIZE (GBL_MSC_NAME_SIZE * GBL_MSC_MAX_LUNS + GBL_MSC_MAX_LUNS)
 
 typedef EFI_STATUS (*GBL_MSC_MEDIA_READ)(IN VOID *Context, IN UINT64 Offset,
                                         OUT VOID *Buffer, IN UINTN Size);
 
 typedef struct {
   UINT64             Size;
+  UINT32             BlockSize;
   GBL_MSC_MEDIA_READ Read;
   VOID               *Context;
   BOOLEAN            IsPartition;
@@ -48,6 +51,8 @@ typedef struct {
   UINT8              SenseKey;
   UINT8              Asc;
   UINT8              Ascq;
+  UINT32             BlockSize;
+  UINT8              LunCount;
   BOOLEAN            FromDisk;
   BOOLEAN            HaltIn;
   BOOLEAN            HaltOut;

@@ -22,13 +22,13 @@ CmdUsbMsc (IN CONST CHAR8 *Argument, IN VOID *Data, IN UINT32 Size)
   UINTN PayloadSize;
   UINTN Attempt;
   UINTN NameLength = 0;
-  CHAR8 Partition[GBL_MSC_NAME_SIZE] = {0};
+  CHAR8 Partition[GBL_MSC_SPEC_SIZE] = {0};
   EFI_USB_DEVICE_PROTOCOL *Usb = GetFastbootDeviceData ()->UsbDeviceProtocol;
 
   (VOID)Data;
   (VOID)Size;
   if (*Argument != '\0' && *Argument != ' ') {
-    FastbootFail ("usage: oem usb-msc [exact-partition-name]");
+    FastbootFail ("usage: oem usb-msc [exact-partition-name[,exact-partition-name...]]");
     return;
   }
   while (*Argument == ' ') {
@@ -41,7 +41,7 @@ CmdUsbMsc (IN CONST CHAR8 *Argument, IN VOID *Data, IN UINT32 Size)
     Argument++;
   }
   if (*Argument != '\0') {
-    FastbootFail ("usage: oem usb-msc [exact-partition-name]");
+    FastbootFail ("usage: oem usb-msc [exact-partition-name[,exact-partition-name...]]");
     return;
   }
   if (NameLength != 0 && !GBL_USB_MSC_PARTITION_EXPORT) {
@@ -60,7 +60,7 @@ CmdUsbMsc (IN CONST CHAR8 *Argument, IN VOID *Data, IN UINT32 Size)
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_ERROR, "USB MSC: preflight failed: %r\n", Status));
     if (Status == EFI_INVALID_PARAMETER) {
-      FastbootFail ("usage: oem usb-msc [exact-partition-name]");
+      FastbootFail ("usage: oem usb-msc [exact-partition-name[,exact-partition-name...]]");
     } else if (Status == EFI_ACCESS_DENIED) {
       FastbootFail ("partition export requires an unlocked device");
     } else if (Status == EFI_NO_MAPPING) {

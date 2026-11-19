@@ -33,6 +33,14 @@ WriteBe32 (OUT UINT8 *Bytes, IN UINT32 Value)
   }
 }
 
+STATIC VOID
+WriteBe24 (OUT UINT8 *Bytes, IN UINT32 Value)
+{
+  Bytes[0] = (UINT8)(Value >> 16);
+  Bytes[1] = (UINT8)(Value >> 8);
+  Bytes[2] = (UINT8)Value;
+}
+
 VOID
 GblMscMakeDisk (OUT UINT8 *Disk)
 {
@@ -90,6 +98,8 @@ GblMscBotInit (OUT GBL_MSC_BOT *Bot, IN CONST UINT8 *Disk, IN UINT64 Size)
   ZeroMem (Bot, sizeof (*Bot));
   Bot->Disk = Disk;
   Bot->DiskSize = Size;
+  Bot->BlockSize = GBL_MSC_BLOCK_SIZE;
+  Bot->LunCount = 1;
   Bot->MediaPresent = TRUE;
 }
 
@@ -101,6 +111,8 @@ GblMscBotInitMedia (OUT GBL_MSC_BOT *Bot, IN CONST GBL_MSC_MEDIA *Media)
   Bot->ReadContext = Media->Context;
   Bot->IsPartition = Media->IsPartition;
   Bot->Serial = Media->Serial;
+  Bot->BlockSize = Media->BlockSize == 0 ? GBL_MSC_BLOCK_SIZE : Media->BlockSize;
+  Bot->LunCount = 1;
 }
 
 STATIC VOID
@@ -128,9 +140,11 @@ ScsiCommand (
   UINT32 Blocks;
   UINT64 Lba;
   BOOLEAN Write = FALSE;
-  UINT64 LastBlock = Bot->DiskSize / GBL_MSC_BLOCK_SIZE - 1;
+  UINT32 BlockSize = Bot->BlockSize == 0 ? GBL_MSC_BLOCK_SIZE : Bot->BlockSize;
+  UINT64 LastBlock = Bot->DiskSize / BlockSize - 1;
   CONST CHAR8 *Serial;
   UINTN SerialLength;
+  UINTN Index;
 
   *Direction = GblMscNoData;
   if ((Opcode >> 5) == 1 || (Opcode >> 5) == 2) {
@@ -176,7 +190,13 @@ ScsiCommand (
       Length = (UINT32)SerialLength + 4;
     } else if (Command[1] == 0 && Command[2] == 0) {
       Bot->Response[1] = 0x80;
-      Bot->Response[2] = 4;
+      /*
+       * INQUIRY version 0x05 (SPC-3). Hosts gate VPD page 0x80/0x83, REPORT
+       * LUNS and other multi-LUN handling on the reported version; advertising
+       * SPC-2 (0x04) makes Linux scan sequentially and never request the
+       * per-LUN serial number page.
+       */
+      Bot->Response[2] = 5;
       Bot->Response[3] = 2;
       Bot->Response[4] = 31;
       CopyMem (Bot->Response + 8, Bot->IsPartition
@@ -220,16 +240,34 @@ ScsiCommand (
   case 0x23:
     *Direction = GblMscDataIn;
     Bot->Response[3] = 8;
-    WriteBe32 (Bot->Response + 4, (UINT32)MIN (Bot->DiskSize / GBL_MSC_BLOCK_SIZE, MAX_UINT32));
+    WriteBe32 (Bot->Response + 4, (UINT32)MIN (Bot->DiskSize / BlockSize, MAX_UINT32));
     Bot->Response[8] = 2;
-    Bot->Response[10] = 2;
+    WriteBe24 (Bot->Response + 9, BlockSize);
     Length = MIN (12U, ((UINT32)Command[7] << 8) | Command[8]);
     break;
   case 0x25:
     *Direction = GblMscDataIn;
     WriteBe32 (Bot->Response, (UINT32)MIN (LastBlock, MAX_UINT32));
-    WriteBe32 (Bot->Response + 4, GBL_MSC_BLOCK_SIZE);
+    WriteBe32 (Bot->Response + 4, BlockSize);
     Length = 8;
+    break;
+  case 0xa0:
+    *Direction = GblMscDataIn;
+    if (Command[2] != 0 || Command[3] != 0) {
+      FailCommand (Bot, 5, 0x24);
+      return 0;
+    }
+    WriteBe32 (Bot->Response, (UINT32)(Bot->LunCount * 8));
+    for (Index = 0; Index < Bot->LunCount; Index++) {
+      /*
+       * SAM-5 peripheral device addressing: byte 0 carries the bus (0) and
+       * byte 1 the LUN. Hosts decode the list with that layout, so a LUN
+       * written into byte 0 comes back as a different, unreachable number.
+       */
+      Bot->Response[4 + Index * 8] = (UINT8)(Index >> 8);
+      Bot->Response[4 + Index * 8 + 1] = (UINT8)Index;
+    }
+    Length = MIN (4U + (UINT32)Bot->LunCount * 8U, ReadBe32 (Command + 6));
     break;
   case 0x9e:
     *Direction = GblMscDataIn;
@@ -240,9 +278,19 @@ ScsiCommand (
     }
     WriteBe32 (Bot->Response, (UINT32)(LastBlock >> 32));
     WriteBe32 (Bot->Response + 4, (UINT32)LastBlock);
-    WriteBe32 (Bot->Response + 8, GBL_MSC_BLOCK_SIZE);
+    WriteBe32 (Bot->Response + 8, BlockSize);
     Length = MIN (32U, ReadBe32 (Command + 10));
     break;
+  case 0x2f:
+    *Direction = GblMscNoData;
+    Lba = ReadBe32 (Command + 2);
+    Blocks = ((UINT32)Command[7] << 8) | Command[8];
+    if (Blocks > MAX_UINT32 / BlockSize ||
+        Lba > Bot->DiskSize / BlockSize ||
+        Blocks > Bot->DiskSize / BlockSize - Lba) {
+      FailCommand (Bot, 5, 0x21);
+    }
+    return 0;
   case 0x35:
   case 0x91:
     return 0;
@@ -268,19 +316,19 @@ ScsiCommand (
       Blocks = RequiredSize == 10 ? ((UINT32)Command[7] << 8) | Command[8]
                                  : ReadBe32 (Command + 6);
     }
-    if (Blocks > MAX_UINT32 / GBL_MSC_BLOCK_SIZE) {
+    if (Blocks > MAX_UINT32 / BlockSize) {
       FailCommand (Bot, 5, 0x21);
       return 0;
     }
-    Length = Blocks * GBL_MSC_BLOCK_SIZE;
+    Length = Blocks * BlockSize;
     if (Write) {
       FailCommand (Bot, 7, 0x27);
-    } else if (Lba > Bot->DiskSize / GBL_MSC_BLOCK_SIZE ||
-               Blocks > Bot->DiskSize / GBL_MSC_BLOCK_SIZE - Lba) {
+    } else if (Lba > Bot->DiskSize / BlockSize ||
+               Blocks > Bot->DiskSize / BlockSize - Lba) {
       FailCommand (Bot, 5, 0x21);
     } else {
       Bot->FromDisk = TRUE;
-      Bot->DiskOffset = Lba * GBL_MSC_BLOCK_SIZE;
+      Bot->DiskOffset = Lba * BlockSize;
     }
     break;
   default:
@@ -308,7 +356,7 @@ GblMscBotBegin (IN OUT GBL_MSC_BOT *Bot, IN CONST UINT8 *Cbw, IN UINTN Size)
   Bot->HaltOut = FALSE;
   ZeroMem (Bot->Response, sizeof (Bot->Response));
   if (Bot->NeedsReset || Size != GBL_MSC_CBW_SIZE ||
-      ReadLe32 (Cbw) != 0x43425355 || Cbw[13] != 0 ||
+      ReadLe32 (Cbw) != 0x43425355 ||
       (Cbw[12] & 0x7f) != 0 || Cbw[14] == 0 || Cbw[14] > 16) {
     Bot->NeedsReset = TRUE;
     Bot->HaltIn = TRUE;
@@ -317,6 +365,13 @@ GblMscBotBegin (IN OUT GBL_MSC_BOT *Bot, IN CONST UINT8 *Cbw, IN UINTN Size)
   }
   Bot->Tag = ReadLe32 (Cbw + 4);
   Bot->HostLength = ReadLe32 (Cbw + 8);
+  if (Cbw[13] >= Bot->LunCount) {
+    Bot->Status = 1;
+    Bot->SenseKey = 5;
+    Bot->Asc = 0x25;
+    Bot->Ascq = 0;
+    return EFI_SUCCESS;
+  }
   HostIn = (Cbw[12] & 0x80) != 0;
   DeviceLength = ScsiCommand (Bot, Cbw + 15, Cbw[14], &Direction);
   if (DeviceLength == 0) {
