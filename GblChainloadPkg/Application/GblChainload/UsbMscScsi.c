@@ -133,6 +133,7 @@ FailCommand (IN OUT GBL_MSC_BOT *Bot, IN UINT8 Sense, IN UINT8 Asc)
 #define GBL_MSC_MODE_BLOCK_DESCRIPTOR 8U
 #define GBL_MSC_MODE_PAGE_CACHING 0x08U
 #define GBL_MSC_MODE_PAGE_CONTROL 0x0aU
+#define GBL_MSC_MODE_PAGE_CAPABILITIES 0x2aU
 #define GBL_MSC_MODE_PAGE_ALL 0x3fU
 
 /*
@@ -164,6 +165,27 @@ ControlPage (OUT UINT8 *Page)
 }
 
 /*
+ * MMC "CD/DVD capabilities and mechanical status" page (0x2A). Optical tools
+ * ask for it to learn what the drive can do; answering ILLEGAL REQUEST makes
+ * them treat the LUN as a bare SCSI-1 drive and skip CD-specific handling.
+ *
+ * Only the properties of this LUN are described: a read-only data disc with
+ * no CD-R/RW writing, no CD-DA audio, no C2 pointers, no DVD and no
+ * sub-channel support. Every capability bit is therefore clear, which is the
+ * truthful answer for an image that cannot be written, played or scanned for
+ * C2 errors. The speed and mechanical-status fields are reported as zero
+ * (not available) rather than guessed.
+ */
+STATIC UINT32
+CapabilitiesPage (OUT UINT8 *Page)
+{
+  ZeroMem (Page, 20);
+  Page[0] = GBL_MSC_MODE_PAGE_CAPABILITIES;
+  Page[1] = 18;
+  return 20;
+}
+
+/*
  * MODE SENSE(6)/(10). Only current and default values exist, so page control
  * 0 and 2 return the same bytes and 1 (changeable) / 3 (saved) are rejected.
  * Page code 0 returns the header and block descriptor only, page code 0x3f
@@ -191,7 +213,9 @@ ModeSense (
 
   if ((PageControl != 0 && PageControl != 2) ||
       (PageCode != 0 && PageCode != GBL_MSC_MODE_PAGE_CACHING &&
-       PageCode != GBL_MSC_MODE_PAGE_CONTROL && PageCode != GBL_MSC_MODE_PAGE_ALL)) {
+       PageCode != GBL_MSC_MODE_PAGE_CONTROL && PageCode != GBL_MSC_MODE_PAGE_ALL &&
+       !(PageCode == GBL_MSC_MODE_PAGE_CAPABILITIES &&
+         Bot->PeripheralType == GBL_MSC_PERIPHERAL_CDROM))) {
     FailCommand (Bot, 5, 0x24);
     return 0;
   }
@@ -202,6 +226,10 @@ ModeSense (
   }
   if (PageCode == GBL_MSC_MODE_PAGE_CONTROL || PageCode == GBL_MSC_MODE_PAGE_ALL) {
     Length += ControlPage (Page + Length);
+  }
+  if (Bot->PeripheralType == GBL_MSC_PERIPHERAL_CDROM &&
+      (PageCode == GBL_MSC_MODE_PAGE_CAPABILITIES || PageCode == GBL_MSC_MODE_PAGE_ALL)) {
+    Length += CapabilitiesPage (Page + Length);
   }
   if (Ten) {
     Bot->Response[0] = (UINT8)((Header + BlockDescriptor + Length - 2) >> 8);
@@ -259,6 +287,33 @@ GetConfiguration (IN OUT GBL_MSC_BOT *Bot, IN CONST UINT8 *Command)
   Bot->Response[3] = 4;
   Bot->Response[6] = 0;
   Bot->Response[7] = 0x08;
+  return MIN (8U, Allocation);
+}
+
+/*
+ * MMC GET EVENT STATUS NOTIFICATION. The LUN has no asynchronous events: the
+ * medium cannot be removed, never changes and the tray state is fixed, so
+ * every poll is answered with "no event available" (NEA) and an event
+ * descriptor length of 0. Reporting a media event instead would make the host
+ * believe the image had been ejected or replaced and drop the cached capacity.
+ *
+ * The supported-event-class mask still advertises the media class, which is
+ * what tells a poller that this drive would report such events at all.
+ */
+STATIC UINT32
+GetEventStatusNotification (IN OUT GBL_MSC_BOT *Bot, IN CONST UINT8 *Command)
+{
+  UINT32 Allocation = ((UINT32)Command[7] << 8) | Command[8];
+
+  if (Bot->PeripheralType != GBL_MSC_PERIPHERAL_CDROM) {
+    FailCommand (Bot, 5, 0x20);
+    return 0;
+  }
+  /* Event descriptor length 0, NEA set, notification class 0 (no event). */
+  Bot->Response[2] = 0x80;
+  /* Supported event classes: bit 4 of the 24-bit mask is the media class. */
+  Bot->Response[5] = 0x10;
+  /* No event code follows because no descriptor is returned. */
   return MIN (8U, Allocation);
 }
 
@@ -416,13 +471,13 @@ ScsiCommand (
       Bot->Response[3] = 2;
       Bot->Response[4] = 31;
       if (Bot->PeripheralType == GBL_MSC_PERIPHERAL_CDROM) {
-        CopyMem (Bot->Response + 8, "GBL     ISO IMAGE       0007", 28);
+        CopyMem (Bot->Response + 8, "GBL     ISO IMAGE       0008", 28);
       } else if (Bot->IsFile) {
-        CopyMem (Bot->Response + 8, "GBL     FILE IMAGE      0007", 28);
+        CopyMem (Bot->Response + 8, "GBL     FILE IMAGE      0008", 28);
       } else if (Bot->IsPartition) {
-        CopyMem (Bot->Response + 8, "GBL     PARTITION       0007", 28);
+        CopyMem (Bot->Response + 8, "GBL     PARTITION       0008", 28);
       } else {
-        CopyMem (Bot->Response + 8, "GBL     RAM DISK        0007", 28);
+        CopyMem (Bot->Response + 8, "GBL     RAM DISK        0008", 28);
       }
       Length = 36;
     } else {
@@ -441,6 +496,9 @@ ScsiCommand (
   case 0x46:
     *Direction = GblMscDataIn;
     return GetConfiguration (Bot, Command);
+  case 0x4a:
+    *Direction = GblMscDataIn;
+    return GetEventStatusNotification (Bot, Command);
   case 0x1b:
     if ((Command[4] & 3) == 2) {
       if (Bot->PreventRemoval) {
