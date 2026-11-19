@@ -56,5 +56,13 @@ media = (root / "GblChainloadPkg/Application/GblChainload/UsbMscMedia.c").read_t
 assert "->ReadBlocks (" in media
 for forbidden in ("->WriteBlocks", "->FlushBlocks", "->Reset (", "UpdatePartitionEntries", "SetActiveSlot"):
     assert forbidden not in media, forbidden
-print("ok 103_usb_msc — default partition-export guard, protocol tests, sanitizers and reproducible Fastboot integration patch")
+# The file/ISO backend must stay read-only: open for read and only Read/Close.
+assert "gEfiSimpleFileSystemProtocolGuid" in media
+assert "EFI_FILE_MODE_READ" in media
+for forbidden in ("->Write (", "->SetInfo (", "->Delete (", "EFI_FILE_MODE_WRITE"):
+    assert forbidden not in media, forbidden
+scsi = (root / "GblChainloadPkg/Application/GblChainload/UsbMscScsi.c").read_text()
+assert "GBL_MSC_MODE_PAGE_CACHING" in scsi and "GBL_MSC_MODE_PAGE_CONTROL" in scsi
+assert "GBL_MSC_PERIPHERAL_CDROM" in scsi
+print("ok 103_usb_msc — default partition-export guard, read-only ISO/file backend, MODE SENSE pages, protocol tests, sanitizers and reproducible Fastboot integration patch")
 PY

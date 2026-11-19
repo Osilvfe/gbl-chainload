@@ -5,13 +5,17 @@
 #undef NULL
 #include <Uefi.h>
 #include <Uefi/UefiGpt.h>
+#include <Guid/FileInfo.h>
 #include <Protocol/BlockIo.h>
+#include <Protocol/SimpleFileSystem.h>
 #include "../../../GblChainloadPkg/Application/GblChainload/UsbMscUsb.c"
 #include "../../../GblChainloadPkg/Application/GblChainload/UsbMscFastboot.c"
 
 EFI_GUID gEfiUsbfnIoProtocolGuid = EFI_USBFN_IO_PROTOCOL_GUID;
 EFI_GUID gEfiBlockIoProtocolGuid = EFI_BLOCK_IO_PROTOCOL_GUID;
 EFI_GUID gEfiPartitionRecordGuid = {1, 2, 3, {4}};
+EFI_GUID gEfiSimpleFileSystemProtocolGuid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+EFI_GUID gEfiFileInfoGuid = EFI_FILE_INFO_ID;
 STATIC EFI_BOOT_SERVICES mBootServices;
 EFI_BOOT_SERVICES *gBS = &mBootServices;
 EFI_SYSTEM_TABLE *gST;
@@ -42,6 +46,36 @@ STATIC BOOLEAN mAck;
 STATIC BOOLEAN mFail;
 STATIC BOOLEAN mFlashComplete;
 STATIC VOID (*mCommand)(CONST CHAR8 *, VOID *, UINT32);
+#define MOCK_VOLUMES 2
+#define MOCK_FILES 3
+#define MOCK_FILE_OBJECTS 8
+
+typedef struct {
+  BOOLEAN Present;
+  BOOLEAN Directory;
+  CHAR16 Path[64];
+  UINT64 Size;
+} MOCK_FILE;
+
+typedef struct {
+  EFI_FILE_PROTOCOL Protocol;
+  BOOLEAN InUse;
+  BOOLEAN Root;
+  UINTN Volume;
+  UINTN Slot;
+  UINT64 Position;
+} MOCK_FILE_OBJECT;
+
+STATIC MOCK_FILE mFiles[MOCK_VOLUMES][MOCK_FILES];
+STATIC MOCK_FILE_OBJECT mRootObjects[MOCK_VOLUMES];
+STATIC MOCK_FILE_OBJECT mFileObjects[MOCK_FILE_OBJECTS];
+STATIC EFI_SIMPLE_FILE_SYSTEM_PROTOCOL mVolumeFs[MOCK_VOLUMES];
+STATIC UINT8 mFsTags[MOCK_VOLUMES];
+STATIC UINTN mVolumeCount;
+STATIC UINTN mFileReads;
+STATIC EFI_STATUS mFileReadStatus;
+STATIC UINTN mFileOpenCalls;
+
 STATIC EFI_BLOCK_IO_PROTOCOL mBlockIo[2];
 STATIC EFI_BLOCK_IO_MEDIA mBlockMedia[2];
 STATIC EFI_PARTITION_ENTRY mPartitionEntries[2];
@@ -127,12 +161,20 @@ STATIC EFI_STATUS EFIAPI LocateHandles (EFI_LOCATE_SEARCH_TYPE SearchType, EFI_G
                                        VOID *Key, UINTN *Count, EFI_HANDLE **Handles) {
   UINTN Index;
   assert (SearchType == ByProtocol && Key == NULL);
-  assert (memcmp (Guid, &gEfiBlockIoProtocolGuid, sizeof (*Guid)) == 0);
-  if (mPartitionCount == 0) return EFI_NOT_FOUND;
-  *Handles = AllocateZeroPool (mPartitionCount * sizeof (**Handles));
+  if (memcmp (Guid, &gEfiBlockIoProtocolGuid, sizeof (*Guid)) == 0) {
+    if (mPartitionCount == 0) return EFI_NOT_FOUND;
+    *Handles = AllocateZeroPool (mPartitionCount * sizeof (**Handles));
+    if (*Handles == NULL) return EFI_OUT_OF_RESOURCES;
+    *Count = mPartitionCount;
+    for (Index = 0; Index < *Count; Index++) (*Handles)[Index] = &mBlockIo[Index];
+    return EFI_SUCCESS;
+  }
+  assert (memcmp (Guid, &gEfiSimpleFileSystemProtocolGuid, sizeof (*Guid)) == 0);
+  if (mVolumeCount == 0) return EFI_NOT_FOUND;
+  *Handles = AllocateZeroPool (mVolumeCount * sizeof (**Handles));
   if (*Handles == NULL) return EFI_OUT_OF_RESOURCES;
-  *Count = mPartitionCount;
-  for (Index = 0; Index < *Count; Index++) (*Handles)[Index] = &mBlockIo[Index];
+  *Count = mVolumeCount;
+  for (Index = 0; Index < *Count; Index++) (*Handles)[Index] = &mFsTags[Index];
   return EFI_SUCCESS;
 }
 
@@ -140,12 +182,19 @@ STATIC EFI_STATUS EFIAPI HandleProtocol (EFI_HANDLE Handle, EFI_GUID *Guid, VOID
   UINTN Index;
   for (Index = 0; Index < mPartitionCount; Index++) {
     if (Handle != &mBlockIo[Index]) continue;
+    assert (memcmp (Guid, &gEfiBlockIoProtocolGuid, sizeof (*Guid)) == 0 ||
+            memcmp (Guid, &gEfiPartitionRecordGuid, sizeof (*Guid)) == 0);
     if (memcmp (Guid, &gEfiBlockIoProtocolGuid, sizeof (*Guid)) == 0) {
       *Interface = &mBlockIo[Index];
     } else {
-      assert (memcmp (Guid, &gEfiPartitionRecordGuid, sizeof (*Guid)) == 0);
       *Interface = &mPartitionEntries[Index];
     }
+    return EFI_SUCCESS;
+  }
+  for (Index = 0; Index < mVolumeCount; Index++) {
+    if (Handle != &mFsTags[Index]) continue;
+    assert (memcmp (Guid, &gEfiSimpleFileSystemProtocolGuid, sizeof (*Guid)) == 0);
+    *Interface = &mVolumeFs[Index];
     return EFI_SUCCESS;
   }
   abort ();
@@ -211,6 +260,217 @@ STATIC EFI_STATUS TestRamRead (VOID *Context, UINT64 Offset, VOID *Buffer, UINTN
   assert (Offset <= GBL_MSC_DISK_SIZE && Size <= GBL_MSC_DISK_SIZE - Offset);
   memcpy (Buffer, (UINT8 *)Context + (UINTN)Offset, Size);
   return EFI_SUCCESS;
+}
+
+STATIC UINT8 FileByte (UINTN Volume, UINT64 Offset) {
+  return (UINT8)(Offset * 37U + Volume * 11U + 0x20U);
+}
+
+STATIC INTN ComparePath (CONST CHAR16 *Left, CONST CHAR16 *Right) {
+  UINTN Index;
+  for (Index = 0; Left[Index] != 0 && Right[Index] != 0; Index++) {
+    if (Left[Index] != Right[Index]) return Left[Index] < Right[Index] ? -1 : 1;
+  }
+  if (Left[Index] == Right[Index]) return 0;
+  return Left[Index] == 0 ? -1 : 1;
+}
+
+STATIC MOCK_FILE_OBJECT *ObjectFromProtocol (EFI_FILE_PROTOCOL *Protocol) {
+  UINTN Index;
+  for (Index = 0; Index < MOCK_VOLUMES; Index++) {
+    if (&mRootObjects[Index].Protocol == Protocol) return &mRootObjects[Index];
+  }
+  for (Index = 0; Index < MOCK_FILE_OBJECTS; Index++) {
+    if (&mFileObjects[Index].Protocol == Protocol) return &mFileObjects[Index];
+  }
+  abort ();
+}
+
+STATIC EFI_STATUS EFIAPI FileOpen (EFI_FILE_PROTOCOL *This, EFI_FILE_PROTOCOL **NewHandle,
+                                   CHAR16 *FileName, UINT64 OpenMode, UINT64 Attributes);
+STATIC EFI_STATUS EFIAPI FileClose (EFI_FILE_PROTOCOL *This);
+STATIC EFI_STATUS EFIAPI FileDelete (EFI_FILE_PROTOCOL *This);
+STATIC EFI_STATUS EFIAPI FileRead (EFI_FILE_PROTOCOL *This, UINTN *BufferSize, VOID *Buffer);
+STATIC EFI_STATUS EFIAPI FileWrite (EFI_FILE_PROTOCOL *This, UINTN *BufferSize, VOID *Buffer);
+STATIC EFI_STATUS EFIAPI FileGetPosition (EFI_FILE_PROTOCOL *This, UINT64 *Position);
+STATIC EFI_STATUS EFIAPI FileSetPosition (EFI_FILE_PROTOCOL *This, UINT64 Position);
+STATIC EFI_STATUS EFIAPI FileGetInfo (EFI_FILE_PROTOCOL *This, EFI_GUID *InfoType,
+                                      UINTN *BufferSize, VOID *Buffer);
+STATIC EFI_STATUS EFIAPI FileSetInfo (EFI_FILE_PROTOCOL *This, EFI_GUID *InfoType,
+                                      UINTN BufferSize, VOID *Buffer);
+STATIC EFI_STATUS EFIAPI FileFlush (EFI_FILE_PROTOCOL *This);
+
+STATIC VOID FillFileProtocol (MOCK_FILE_OBJECT *Object) {
+  Object->Protocol.Revision = EFI_FILE_PROTOCOL_REVISION;
+  Object->Protocol.Open = FileOpen;
+  Object->Protocol.Close = FileClose;
+  Object->Protocol.Delete = FileDelete;
+  Object->Protocol.Read = FileRead;
+  Object->Protocol.Write = FileWrite;
+  Object->Protocol.GetPosition = FileGetPosition;
+  Object->Protocol.SetPosition = FileSetPosition;
+  Object->Protocol.GetInfo = FileGetInfo;
+  Object->Protocol.SetInfo = FileSetInfo;
+  Object->Protocol.Flush = FileFlush;
+}
+
+STATIC EFI_STATUS EFIAPI OpenVolume (EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *This,
+                                     EFI_FILE_PROTOCOL **Root) {
+  UINTN Index;
+  for (Index = 0; Index < mVolumeCount; Index++) {
+    if (&mVolumeFs[Index] != This) continue;
+    memset (&mRootObjects[Index], 0, sizeof (mRootObjects[Index]));
+    mRootObjects[Index].InUse = TRUE;
+    mRootObjects[Index].Root = TRUE;
+    mRootObjects[Index].Volume = Index;
+    FillFileProtocol (&mRootObjects[Index]);
+    *Root = &mRootObjects[Index].Protocol;
+    return EFI_SUCCESS;
+  }
+  abort ();
+}
+
+STATIC EFI_STATUS EFIAPI FileOpen (EFI_FILE_PROTOCOL *This, EFI_FILE_PROTOCOL **NewHandle,
+                                   CHAR16 *FileName, UINT64 OpenMode, UINT64 Attributes) {
+  MOCK_FILE_OBJECT *Object = ObjectFromProtocol (This);
+  UINTN Slot;
+  UINTN Index;
+  assert (Object->Root && NewHandle != NULL && FileName != NULL);
+  assert (OpenMode == EFI_FILE_MODE_READ && Attributes == 0);
+  mFileOpenCalls++;
+  for (Slot = 0; Slot < MOCK_FILES; Slot++) {
+    if (!mFiles[Object->Volume][Slot].Present) continue;
+    if (ComparePath (mFiles[Object->Volume][Slot].Path, FileName) != 0) continue;
+    for (Index = 0; Index < MOCK_FILE_OBJECTS; Index++) {
+      if (mFileObjects[Index].InUse) continue;
+      memset (&mFileObjects[Index], 0, sizeof (mFileObjects[Index]));
+      mFileObjects[Index].InUse = TRUE;
+      mFileObjects[Index].Volume = Object->Volume;
+      mFileObjects[Index].Slot = Slot;
+      FillFileProtocol (&mFileObjects[Index]);
+      *NewHandle = &mFileObjects[Index].Protocol;
+      return EFI_SUCCESS;
+    }
+    abort ();
+  }
+  return EFI_NOT_FOUND;
+}
+
+STATIC EFI_STATUS EFIAPI FileClose (EFI_FILE_PROTOCOL *This) {
+  MOCK_FILE_OBJECT *Object = ObjectFromProtocol (This);
+  assert (Object->InUse);
+  Object->InUse = FALSE;
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS EFIAPI FileDelete (EFI_FILE_PROTOCOL *This) {
+  (VOID)This;
+  abort ();
+}
+
+STATIC EFI_STATUS EFIAPI FileRead (EFI_FILE_PROTOCOL *This, UINTN *BufferSize, VOID *Buffer) {
+  MOCK_FILE_OBJECT *Object = ObjectFromProtocol (This);
+  MOCK_FILE *Entry = &mFiles[Object->Volume][Object->Slot];
+  UINTN Index;
+  UINTN Count;
+  assert (!Object->Root && Object->InUse);
+  assert (Object->Position <= Entry->Size);
+  mFileReads++;
+  if (EFI_ERROR (mFileReadStatus)) return mFileReadStatus;
+  Count = (UINTN)MIN ((UINT64)*BufferSize, Entry->Size - Object->Position);
+  for (Index = 0; Index < Count; Index++) {
+    ((UINT8 *)Buffer)[Index] = FileByte (Object->Volume, Object->Position + Index);
+  }
+  Object->Position += Count;
+  *BufferSize = Count;
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS EFIAPI FileWrite (EFI_FILE_PROTOCOL *This, UINTN *BufferSize, VOID *Buffer) {
+  (VOID)This; (VOID)BufferSize; (VOID)Buffer;
+  abort ();
+}
+
+STATIC EFI_STATUS EFIAPI FileGetPosition (EFI_FILE_PROTOCOL *This, UINT64 *Position) {
+  (VOID)This; (VOID)Position;
+  abort ();
+}
+
+STATIC EFI_STATUS EFIAPI FileSetPosition (EFI_FILE_PROTOCOL *This, UINT64 Position) {
+  MOCK_FILE_OBJECT *Object = ObjectFromProtocol (This);
+  assert (!Object->Root && Object->InUse);
+  assert (Position <= mFiles[Object->Volume][Object->Slot].Size);
+  Object->Position = Position;
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS EFIAPI FileGetInfo (EFI_FILE_PROTOCOL *This, EFI_GUID *InfoType,
+                                      UINTN *BufferSize, VOID *Buffer) {
+  MOCK_FILE_OBJECT *Object = ObjectFromProtocol (This);
+  MOCK_FILE *Entry = Object->Root ? NULL : &mFiles[Object->Volume][Object->Slot];
+  UINTN Required = SIZE_OF_EFI_FILE_INFO + 32;
+  EFI_FILE_INFO *Info;
+
+  assert (memcmp (InfoType, &gEfiFileInfoGuid, sizeof (*InfoType)) == 0);
+  if (Buffer == NULL || *BufferSize < Required) {
+    *BufferSize = Required;
+    return EFI_BUFFER_TOO_SMALL;
+  }
+  Info = Buffer;
+  memset (Info, 0, Required);
+  Info->Size = Required;
+  if (Entry == NULL) {
+    Info->Attribute = EFI_FILE_DIRECTORY;
+  } else {
+    Info->Attribute = Entry->Directory ? EFI_FILE_DIRECTORY : 0;
+    Info->FileSize = Entry->Size;
+  }
+  *BufferSize = Required;
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS EFIAPI FileSetInfo (EFI_FILE_PROTOCOL *This, EFI_GUID *InfoType,
+                                      UINTN BufferSize, VOID *Buffer) {
+  (VOID)This; (VOID)InfoType; (VOID)BufferSize; (VOID)Buffer;
+  abort ();
+}
+
+STATIC EFI_STATUS EFIAPI FileFlush (EFI_FILE_PROTOCOL *This) {
+  (VOID)This;
+  abort ();
+}
+
+STATIC VOID AddVolumeFile (UINTN Volume, CONST CHAR8 *Path, UINT64 Size, BOOLEAN Directory) {
+  UINTN Slot;
+  UINTN Index;
+  for (Slot = 0; Slot < MOCK_FILES; Slot++) {
+    if (mFiles[Volume][Slot].Present) continue;
+    mFiles[Volume][Slot].Present = TRUE;
+    mFiles[Volume][Slot].Directory = Directory;
+    mFiles[Volume][Slot].Size = Size;
+    for (Index = 0; Path[Index] != 0 && Index < 63; Index++) {
+      mFiles[Volume][Slot].Path[Index] = (CHAR16)(UINT8)Path[Index];
+    }
+    return;
+  }
+  abort ();
+}
+
+STATIC VOID SetVolumeCount (UINTN Count) {
+  UINTN Index;
+  assert (Count <= MOCK_VOLUMES);
+  mVolumeCount = Count;
+  memset (mFiles, 0, sizeof (mFiles));
+  memset (mRootObjects, 0, sizeof (mRootObjects));
+  memset (mFileObjects, 0, sizeof (mFileObjects));
+  mFileReads = 0;
+  mFileOpenCalls = 0;
+  mFileReadStatus = EFI_SUCCESS;
+  for (Index = 0; Index < MOCK_VOLUMES; Index++) {
+    memset (&mVolumeFs[Index], 0, sizeof (mVolumeFs[Index]));
+    mVolumeFs[Index].Revision = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_REVISION;
+    mVolumeFs[Index].OpenVolume = OpenVolume;
+  }
 }
 
 STATIC EFI_STATUS EFIAPI StartController (EFI_USBFN_IO_PROTOCOL *Usb) {
@@ -507,6 +767,7 @@ STATIC VOID ResetMocks (VOID) {
   mControlStallCalls = 0;
   mMscPrepared = FALSE;
   mPartitionCount = 1;
+  SetVolumeCount (0);
   mBlockReads = 0;
   mBlockReadStatus = EFI_SUCCESS;
   mChangeMediaDuringRead = FALSE;
@@ -649,7 +910,10 @@ STATIC VOID CoreTests (VOID) {
   assert (memcmp (Data, mDisk, sizeof (Data)) == 0);
   assert (GblMscBotRead (&Bot, 512, Data, 1) == EFI_BAD_BUFFER_SIZE);
   Cbw[19] = 8;
-  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 1 && Bot.HaltIn);
+  /* A command that fails before its data stage does not stall: the host must
+   * still be able to read the CSW and the sense data. */
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 1 &&
+          Bot.InLength == 0 && !Bot.HaltIn);
   MakeCbw (Cbw, 0x2a, 10, 512, FALSE); Cbw[23] = 1;
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 1 && Bot.OutLength == 512);
   assert (Bot.SenseKey == 7 && Bot.Asc == 0x27);
@@ -792,6 +1056,23 @@ STATIC VOID TransportTests (VOID) {
   assert (mDriverPending[3] && mDriverLength[3] == 0 && Msc.BulkState == MscReadZlp);
   assert (CompleteSlot (&Msc, 3, 0, UsbTransferStatusComplete) == EFI_SUCCESS);
   assert (mDriverLength[3] == 13 && mBuffers[3][9] == 2 && mBuffers[3][12] == 0);
+  assert (CompleteSlot (&Msc, 3, 13, UsbTransferStatusComplete) == EFI_SUCCESS);
+
+  /* A rejected answer: the data-in stage has to end with a short packet, then
+   * CSW status 1 (CHECK CONDITION) with the sense reachable through REQUEST
+   * SENSE. A zero-length transfer is not usable here: not every controller
+   * emits one as a ZLP, and without the short packet the host reads the CSW as
+   * payload and reports GOOD. */
+  MakeCbw (mBuffers[2], 0x1a, 6, 63, TRUE); mBuffers[2][17] = 0x02; mBuffers[2][19] = 63;
+  assert (CompleteSlot (&Msc, 2, 31, UsbTransferStatusComplete) == EFI_SUCCESS);
+  assert (mDriverPending[3] && mDriverLength[3] == 63 && Msc.BulkState == MscReadShort);
+  assert (mDriverLength[3] < Msc.BulkPacket);
+  assert (CompleteSlot (&Msc, 3, 63, UsbTransferStatusComplete) == EFI_SUCCESS);
+  assert (mDriverLength[3] == 13 && mBuffers[3][12] == 1);
+  /* The data stage carried the whole host expectation, so the CSW must report
+   * a residue of zero rather than pretending nothing was transferred. */
+  assert (mBuffers[3][8] == 0 && mBuffers[3][9] == 0 && mBuffers[3][10] == 0 &&
+          mBuffers[3][11] == 0);
   assert (CompleteSlot (&Msc, 3, 13, UsbTransferStatusComplete) == EFI_SUCCESS);
 
   MakeCbw (mBuffers[2], 0x1b, 6, 0, FALSE); mBuffers[2][19] = 2;
@@ -1264,6 +1545,265 @@ STATIC VOID CommandTests (VOID) {
   assert (mStopCalls == 0);
 }
 
+STATIC VOID ModeSenseTests (VOID) {
+  GBL_MSC_BOT Bot;
+  UINT8 Cbw[31];
+  UINT8 Data[64];
+
+  GblMscMakeDisk (mDisk);
+  GblMscBotInit (&Bot, mDisk, sizeof (mDisk));
+  /* All pages, current values, block descriptor present: 4 + 8 + 20 + 10. */
+  MakeCbw (Cbw, 0x1a, 6, 64, TRUE);
+  Cbw[17] = 0x3f;
+  Cbw[19] = 64;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0);
+  assert (Bot.InLength == 42);
+  assert (GblMscBotRead (&Bot, 0, Data, 42) == EFI_SUCCESS);
+  assert (Data[0] == 41 && Data[1] == 0 && Data[2] == 0x80 && Data[3] == 8);
+  /* Block descriptor: density 0, 2048 blocks of 512 bytes. */
+  assert (Data[4] == 0 && Data[5] == 0 && Data[6] == 8 && Data[7] == 0);
+  assert (Data[8] == 0 && Data[9] == 0 && Data[10] == 2 && Data[11] == 0);
+  /* Caching page: write cache disabled so hosts report "write through". */
+  assert (Data[12] == 0x08 && Data[13] == 18 && Data[14] == 0 && Data[15] == 0);
+  /* Control page: fixed-format sense data, no saved log parameters. */
+  assert (Data[32] == 0x0a && Data[33] == 8 && Data[34] == 0x04);
+  /* DBD suppresses the block descriptor. */
+  Cbw[16] = 0x08;
+  Cbw[17] = 0x3f;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 34);
+  assert (GblMscBotRead (&Bot, 0, Data, 34) == EFI_SUCCESS);
+  assert (Data[0] == 33 && Data[3] == 0 && Data[4] == 0x08 && Data[5] == 18);
+  assert (Data[24] == 0x0a && Data[25] == 8);
+  /* Page code 0 returns only the header and block descriptor. */
+  Cbw[16] = 0;
+  Cbw[17] = 0;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 12);
+  assert (GblMscBotRead (&Bot, 0, Data, 12) == EFI_SUCCESS);
+  assert (Data[0] == 11 && Data[3] == 8 && Data[4] == 0 && Data[10] == 2);
+  /* Single caching page. */
+  Cbw[17] = 0x08;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 32);
+  /* Default values are identical to current values. */
+  Cbw[17] = 0x88;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 32);
+  /* Changeable and saved values are not implemented. */
+  Cbw[17] = 0x48;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 1 &&
+          Bot.InLength == 0 && !Bot.HaltIn);
+  assert (Bot.SenseKey == 5 && Bot.Asc == 0x24);
+  Cbw[17] = 0xc8;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.SenseKey == 5 && Bot.Asc == 0x24);
+  /* Unimplemented page codes are rejected. */
+  Cbw[17] = 0x02;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.SenseKey == 5 && Bot.Asc == 0x24);
+  /* Allocation length truncates the response. */
+  Cbw[17] = 0x3f;
+  Cbw[19] = 4;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 4);
+  Cbw[19] = 0;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 0);
+  /* MODE SENSE(10) uses the 8-byte header: 8 + 8 + 20 + 10. */
+  MakeCbw (Cbw, 0x5a, 10, 64, TRUE);
+  Cbw[17] = 0x3f;
+  Cbw[23] = 64;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 46);
+  assert (GblMscBotRead (&Bot, 0, Data, 46) == EFI_SUCCESS);
+  assert (Data[0] == 0 && Data[1] == 44 && Data[2] == 0 && Data[3] == 0x80);
+  assert (Data[4] == 0 && Data[5] == 0 && Data[6] == 0 && Data[7] == 8);
+  assert (Data[8] == 0 && Data[9] == 0 && Data[10] == 8 && Data[11] == 0);
+  assert (Data[12] == 0 && Data[13] == 0 && Data[14] == 2 && Data[15] == 0);
+  assert (Data[16] == 0x08 && Data[17] == 18);
+  assert (Data[36] == 0x0a && Data[37] == 8);
+  Cbw[16] = 0x08;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 38);
+  Cbw[16] = 0;
+  Cbw[23] = 9;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 9);
+}
+
+STATIC VOID FileMediaTests (VOID) {
+  GBL_MSC_MEDIA Media;
+  UINT8 Buffer[4096];
+  UINTN Index;
+  UINTN Reads;
+  CHAR8 Serial[64];
+
+  ResetMocks ();
+  assert (GblMscMediaOpen ("iso:", &Media) == EFI_INVALID_PARAMETER);
+  assert (GblMscMediaOpen ("iso:/", &Media) == EFI_INVALID_PARAMETER);
+  assert (GblMscMediaOpen ("iso:/trailing/", &Media) == EFI_INVALID_PARAMETER);
+  assert (GblMscMediaOpen ("iso://", &Media) == EFI_INVALID_PARAMETER);
+  assert (GblMscMediaOpen ("file:", &Media) == EFI_INVALID_PARAMETER);
+  assert (GblMscMediaOpen ("fs0:", &Media) == EFI_INVALID_PARAMETER);
+  assert (GblMscMediaOpen ("fsa:/x.iso", &Media) == EFI_INVALID_PARAMETER);
+  assert (GblMscMediaOpen ("iso:/missing.iso", &Media) == EFI_NOT_FOUND);
+  assert (GblMscMediaOpen ("file:/x.iso", &Media) == EFI_NOT_FOUND);
+
+  SetVolumeCount (1);
+  AddVolumeFile (0, "EFI\\BOOT\\TEST.ISO", 3000, FALSE);
+  assert (GblMscMediaOpen ("iso:/EFI/BOOT/TEST.ISO", &Media) == EFI_SUCCESS);
+  assert (Media.IsFile && !Media.IsPartition);
+  assert (Media.PeripheralType == GBL_MSC_PERIPHERAL_CDROM);
+  assert (Media.BlockSize == GBL_MSC_ISO_BLOCK_SIZE);
+  assert (Media.Size == 4096);
+  assert (strcmp (Media.Name, "iso:/EFI/BOOT/TEST.ISO") == 0);
+  memcpy (Serial, Media.Serial, sizeof (Serial));
+  assert (strncmp (Serial, "GBLISO-", 7) == 0 && strlen (Serial) == 15);
+  /* Reads are block aligned and use the file contents. */
+  assert (Media.Read (Media.Context, 0, Buffer, 2048) == EFI_SUCCESS);
+  for (Index = 0; Index < 2048; Index++) {
+    assert (Buffer[Index] == FileByte (0, Index));
+  }
+  /* The final block is zero padded past the end of the file. */
+  assert (Media.Read (Media.Context, 2048, Buffer, 2048) == EFI_SUCCESS);
+  for (Index = 0; Index < 952; Index++) {
+    assert (Buffer[Index] == FileByte (0, 2048 + Index));
+  }
+  for (Index = 952; Index < 2048; Index++) {
+    assert (Buffer[Index] == 0);
+  }
+  assert (Media.Read (Media.Context, 3000, Buffer, 512) == EFI_SUCCESS);
+  for (Index = 0; Index < 512; Index++) {
+    assert (Buffer[Index] == 0);
+  }
+  assert (Media.Read (Media.Context, Media.Size - 1, Buffer, 1) == EFI_SUCCESS);
+  assert (Buffer[0] == 0);
+  assert (Media.Read (Media.Context, Media.Size, Buffer, 1) == EFI_BAD_BUFFER_SIZE);
+  assert (Media.Read (Media.Context, MAX_UINT64, Buffer, 4096) == EFI_BAD_BUFFER_SIZE);
+  Reads = mFileReads;
+  mFileReadStatus = EFI_DEVICE_ERROR;
+  assert (Media.Read (Media.Context, 0, Buffer, 2048) == EFI_DEVICE_ERROR);
+  mFileReadStatus = EFI_SUCCESS;
+  assert (mFileReads == Reads + 1);
+  GblMscMediaClose (&Media);
+  assert (Media.Context == NULL && Media.Read == NULL);
+  for (Index = 0; Index < MOCK_FILE_OBJECTS; Index++) {
+    assert (!mFileObjects[Index].InUse);
+  }
+  /* The same file as a plain image uses 512-byte blocks and direct access. */
+  assert (GblMscMediaOpen ("file:EFI/BOOT/TEST.ISO", &Media) == EFI_SUCCESS);
+  assert (Media.PeripheralType == GBL_MSC_PERIPHERAL_DIRECT);
+  assert (Media.BlockSize == GBL_MSC_FILE_BLOCK_SIZE && Media.Size == 3072);
+  assert (strncmp (Media.Serial, "GBLFILE-", 8) == 0);
+  assert (strcmp (Media.Serial, Serial) != 0);
+  assert (Media.Read (Media.Context, 2048, Buffer, 1024) == EFI_SUCCESS);
+  for (Index = 0; Index < 952; Index++) {
+    assert (Buffer[Index] == FileByte (0, 2048 + Index));
+  }
+  for (Index = 952; Index < 1024; Index++) {
+    assert (Buffer[Index] == 0);
+  }
+  GblMscMediaClose (&Media);
+  /* Directories and empty files are not media. */
+  SetVolumeCount (1);
+  AddVolumeFile (0, "EFI\\BOOT", 4096, TRUE);
+  assert (GblMscMediaOpen ("iso:/EFI/BOOT", &Media) == EFI_UNSUPPORTED);
+  SetVolumeCount (1);
+  AddVolumeFile (0, "EMPTY.ISO", 0, FALSE);
+  assert (GblMscMediaOpen ("iso:/EMPTY.ISO", &Media) == EFI_UNSUPPORTED);
+  /* A file on the second volume is found by search but not by fs0:. */
+  SetVolumeCount (2);
+  AddVolumeFile (1, "SECOND.ISO", 4096, FALSE);
+  assert (GblMscMediaOpen ("iso:fs0:/SECOND.ISO", &Media) == EFI_NOT_FOUND);
+  assert (GblMscMediaOpen ("iso:fs1:/SECOND.ISO", &Media) == EFI_SUCCESS);
+  assert (Media.Size == 4096);
+  GblMscMediaClose (&Media);
+  assert (GblMscMediaOpen ("file:fs2:/SECOND.ISO", &Media) == EFI_NOT_FOUND);
+  assert (GblMscMediaOpen ("iso:SECOND.ISO", &Media) == EFI_SUCCESS);
+  GblMscMediaClose (&Media);
+  ResetMocks ();
+}
+
+STATIC VOID IsoScsiTests (VOID) {
+  GBL_MSC_MEDIA Media;
+  GBL_MSC_BOT Bot;
+  UINT8 Cbw[31];
+  UINT8 Data[64];
+
+  GblMscMakeDisk (mDisk);
+  ResetMocks ();
+  SetVolumeCount (1);
+  AddVolumeFile (0, "TEST.ISO", 3000, FALSE);
+  assert (GblMscMediaOpen ("iso:/TEST.ISO", &Media) == EFI_SUCCESS);
+  GblMscBotInitMedia (&Bot, &Media);
+  /* INQUIRY reports a read-only CD-ROM device. */
+  MakeCbw (Cbw, 0x12, 6, 36, TRUE);
+  Cbw[19] = 36;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 36);
+  assert (GblMscBotRead (&Bot, 0, Data, 36) == EFI_SUCCESS);
+  assert (Data[0] == 5 && Data[1] == 0x80 && Data[2] == 5);
+  /* Vendor + product only: the 4-byte revision field is the on-device run
+   * marker and is expected to change between validation builds. */
+  assert (memcmp (Data + 8, "GBL     ISO IMAGE       ", 24) == 0);
+  /* READ CAPACITY reports 2048-byte blocks. */
+  MakeCbw (Cbw, 0x25, 10, 8, TRUE);
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 8);
+  assert (GblMscBotRead (&Bot, 0, Data, 8) == EFI_SUCCESS);
+  assert (Data[3] == 1 && Data[4] == 0 && Data[6] == 8 && Data[7] == 0);
+  /* Block descriptor uses the ISO block size. */
+  MakeCbw (Cbw, 0x1a, 6, 64, TRUE);
+  Cbw[17] = 0x3f;
+  Cbw[19] = 64;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 42);
+  assert (GblMscBotRead (&Bot, 0, Data, 42) == EFI_SUCCESS);
+  assert (Data[5] == 0 && Data[6] == 0 && Data[7] == 2);
+  assert (Data[9] == 0 && Data[10] == 8 && Data[11] == 0);
+  /* GET CONFIGURATION advertises the CD-ROM profile only: the data length
+   * counts the reserved bytes and the profile, and no features follow. */
+  MakeCbw (Cbw, 0x46, 10, 12, TRUE);
+  Cbw[23] = 12;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 8);
+  assert (GblMscBotRead (&Bot, 0, Data, 8) == EFI_SUCCESS);
+  assert (Data[0] == 0 && Data[1] == 0 && Data[2] == 0 && Data[3] == 4);
+  assert (Data[6] == 0 && Data[7] == 0x08);
+  /* A feature code that is not implemented returns an empty feature list. */
+  Cbw[16] = 2;
+  Cbw[18] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 4);
+  assert (Bot.Response[3] == 0);
+  /* Request type 3 is reserved. */
+  Cbw[16] = 3;
+  Cbw[18] = 0;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.SenseKey == 5 && Bot.Asc == 0x24);
+  /* READ TOC: one data track at LBA 0, then the lead-out. The lead-out carries
+   * the address one block past the last block, which is how a host sizes the
+   * disc (cdrom_get_last_written), so it must not be zero. */
+  MakeCbw (Cbw, 0x43, 10, 20, TRUE);
+  Cbw[23] = 20;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 20);
+  assert (GblMscBotRead (&Bot, 0, Data, 20) == EFI_SUCCESS);
+  assert (Data[0] == 0 && Data[1] == 18 && Data[2] == 1 && Data[3] == 1);
+  assert (Data[4] == 0 && Data[5] == 0x14 && Data[6] == 1 && Data[7] == 0);
+  assert (Data[8] == 0 && Data[9] == 0 && Data[10] == 0 && Data[11] == 0);
+  assert (Data[12] == 0 && Data[13] == 0x14 && Data[14] == 0xaa && Data[15] == 0);
+  assert (Data[16] == 0 && Data[17] == 0 && Data[18] == 0 && Data[19] == 2);
+  /* CDB[6] = 0xAA asks for the lead-out alone and CDB[1] bit 1 selects MSF,
+   * which counts 75 frames per second from 00:02:00. */
+  Cbw[16] = 2;
+  Cbw[21] = 0xaa;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 12);
+  assert (GblMscBotRead (&Bot, 0, Data, 12) == EFI_SUCCESS);
+  assert (Data[1] == 10 && Data[6] == 0xaa);
+  assert (Data[8] == 0 && Data[9] == 0 && Data[10] == 2 && Data[11] == 2);
+  Cbw[16] = 0;
+  Cbw[21] = 0;
+  /* Unsupported formats fall back to the TOC layout instead of failing. */
+  Cbw[17] = 2;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 20);
+  Cbw[17] = 0;
+  GblMscMediaClose (&Media);
+  GblMscBotInit (&Bot, mDisk, sizeof (mDisk));
+  /* MMC commands are invalid for direct-access media. */
+  MakeCbw (Cbw, 0x46, 10, 12, TRUE);
+  Cbw[23] = 12;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 1);
+  assert (Bot.SenseKey == 5 && Bot.Asc == 0x20);
+  MakeCbw (Cbw, 0x43, 10, 12, TRUE);
+  Cbw[23] = 12;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.SenseKey == 5 && Bot.Asc == 0x20);
+  ResetMocks ();
+}
+
 int main (int argc, char **argv) {
   if (argc == 2) {
     FILE *Output;
@@ -1282,9 +1822,12 @@ int main (int argc, char **argv) {
   PartitionTransportTests ();
   PartitionCommandTests ();
   MultiLunTests ();
+  ModeSenseTests ();
+  FileMediaTests ();
+  IsoScsiTests ();
   LifecycleTests ();
   RepeatedSessionTests ();
   CommandTests ();
-  puts ("ok USB MSC: read-only RAM/partitions, multi-LUN REPORT LUNS, 512/4096 logical blocks, 64-bit capacity, VERIFY, Qualcomm EP0, SCSI/BOT reset recovery, repeated exits, DMA lifetime, OOM and Fastboot ACK");
+  puts ("ok USB MSC: read-only RAM/partition/ISO/file media, multi-LUN REPORT LUNS, 512/2048/4096 logical blocks, MODE SENSE headers/block descriptors/caching/control pages, MMC GET CONFIGURATION and READ TOC, 64-bit capacity, VERIFY, Qualcomm EP0, SCSI/BOT reset recovery, repeated exits, DMA lifetime, OOM and Fastboot ACK");
   return 0;
 }

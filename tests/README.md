@@ -13,6 +13,7 @@ bash tests/runall.sh
 | `host/helpers/` | Source for native test harnesses; compiled helpers are ignored |
 | `host/.last/` | Ignored generated test results and scratch artifacts |
 | `avb/` | C ABI tests for the Rust AVB parser |
+| [device/](device/README.md) | Manual, coordinated phone tests (USB MSC self-test and SG_IO probe); never run by CI |
 
 Use `FIXTURES_DIR=/path/to/fixtures` to override the anchor harness's
 fixture root. Both the categorized layout and an existing flat directory

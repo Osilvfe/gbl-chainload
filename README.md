@@ -244,6 +244,14 @@ The experimental path accepts up to four comma-separated exact partition
 names as separate LUNs and preserves each partition's 512- or 4096-byte
 logical block size; `REPORT LUNS`, 64-bit capacity and `VERIFY(10)` are
 supported. It remains BOT-only and read-only.
+The same list may name read-only files from any EFI system partition:
+`iso:path/to/image.iso` exports the image as a 2048-byte-block CD-ROM LUN,
+`file:path/to/disk.img` exports it as a 512-byte-block disk LUN, and a
+leading `fsN:` selects one volume, for example `iso:fs1:/EFI/BIG.ISO`.
+Mixing partitions and files is allowed. `MODE SENSE(6)/(10)` now returns the
+write-protected header, a real block descriptor with the LUN's logical block
+size, and the caching (0x08) and control (0x0a) mode pages, so hosts report
+a write-through cache instead of an unknown mode page.
 For coordinated partition-export testing, both build entries accept
 `--experimental-usb-msc-partition-export`; enabled build names and default
 output filenames gain `-msc-partitions`. This does not enable host writes.

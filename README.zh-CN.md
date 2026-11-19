@@ -242,6 +242,13 @@ fastboot oem boot-nodtbo
 实验路径还接受最多四个逗号分隔的精确分区名，分别作为独立 LUN，并保留
 各分区 512 或 4096 字节的逻辑块大小；支持 `REPORT LUNS`、64 位容量和
 `VERIFY(10)`，仍然仅使用 BOT 且保持只读。
+同一列表也可以导出 EFI 系统分区上的只读文件：`iso:路径/镜像.iso` 以
+2048 字节逻辑块的 CD-ROM LUN 导出，`file:路径/disk.img` 以 512 字节
+逻辑块的磁盘 LUN 导出，前置 `fsN:` 可指定卷，例如
+`iso:fs1:/EFI/BIG.ISO`；分区与文件可在同一条命令中混用。
+`MODE SENSE(6)/(10)` 现在返回带写保护的头部、含该 LUN 逻辑块大小的真实
+块描述符，以及 caching(0x08)、control(0x0a) 模式页，主机不再报
+“未找到 caching 模式页”，并按 write-through 处理。
 需要协同验证分区导出时，两套构建入口均接受
 `--experimental-usb-msc-partition-export`；启用后的构建标识和默认文件名
 带 `-msc-partitions`，不会启用主机写入。

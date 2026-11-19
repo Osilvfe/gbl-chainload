@@ -3,10 +3,10 @@
 GBL can temporarily replace its Fastboot USB interface with a read-only USB
 Mass Storage device exposing up to four LUNs. With no arguments it exposes a
 freshly generated 1 MiB FAT12 RAM disk containing `README.TXT`. Normal builds reject
-partition arguments before storage access or USB handoff. The named-partition
-backend remains experimental, behind `GBL_USB_MSC_PARTITION_EXPORT=1`; host
-coverage includes a fairlady `boot_a` device test with repeated
-RAM/partition sessions and Fastboot resume. Other devices and partition
+media arguments before storage access or USB handoff. The experimental
+backends - named partitions plus read-only ISO/file images - stay behind
+`GBL_USB_MSC_PARTITION_EXPORT=1`; host coverage includes a fairlady `boot_a`
+device test with repeated RAM/partition sessions and Fastboot resume. Other devices and partition
 geometries remain unverified. It never exports a whole UFS LUN,
 writes to storage, decrypts Android
 data, or exports a previous Fastboot download. The existing RAM boot commands
@@ -73,6 +73,58 @@ Each LUN keeps the partition's 512- or 4096-byte logical block size. The
 implementation supports `REPORT LUNS`, 64-bit `READ CAPACITY(16)`, and
 `VERIFY(10)` in addition to the read data path; all write commands are still
 rejected with DATA PROTECT.
+
+### Read-only ISO and file LUNs
+
+The same comma-separated list accepts files that live on an EFI system
+partition, so an image can be inspected from another machine without
+flashing it:
+
+```bash
+fastboot oem usb-msc iso:/EFI/ISO/test.iso
+fastboot oem usb-msc file:/EFI/IMAGES/disk.img
+fastboot oem usb-msc boot_a,iso:fs1:/EFI/ISO/test.iso
+```
+
+- `iso:<path>` reports peripheral device type 5 (CD-ROM) with 2048-byte
+  logical blocks, so hosts treat it as an optical disc and can mount the
+  ISO9660 filesystem directly. `GET CONFIGURATION` advertises only the
+  CD-ROM profile. `READ TOC` reports one data track at LBA 0 followed by the
+  lead-out entry (track `0xAA`) at the block just past the end of the image,
+  in LBA or MSF form as the CDB asks. The lead-out is what `sr_mod` turns into
+  the disc capacity (`cdrom_get_last_written`), so a zero or bogus lead-out
+  makes the host address blocks past the image and log `LBA out of range`
+  during its filesystem probing.
+- `file:<path>` reports peripheral device type 0 (direct access) with
+  512-byte logical blocks, for raw disk images.
+- `fsN:` may follow the scheme to pin one volume; without it the volumes are
+  searched in handle order and the first match wins. Paths are always
+  volume-relative, never device paths, and `..` cannot escape the volume.
+- The final logical block is zero padded when the file size is not a
+  multiple of the block size, and reads are bounded by the padded size.
+- Files are opened `EFI_FILE_MODE_READ` only. There is no write, rename or
+  delete path, no extraction into RAM, and the file handle plus its 64 KiB
+  bounce buffer are released when the session ends.
+- Directories, empty files and unreadable files are rejected during
+  preflight, before Fastboot hands the controller to MSC.
+
+### MODE SENSE
+
+`MODE SENSE(6)` and `MODE SENSE(10)` return the mode header with the
+write-protected bit, an 8-byte block descriptor with the LUN's density,
+block count and logical block size, and the implemented pages:
+
+- page `0x08` (caching): write cache disabled (`WCE=0`) and no read cache,
+  so hosts select write-through instead of logging a missing caching page;
+- page `0x0a` (control): fixed-format sense data and no saved log
+  parameters;
+- page code `0x3f` returns both pages, page code `0x00` returns only the
+  header and block descriptor.
+
+The DBD bit suppresses the block descriptor. Page control `0` (current) and
+`2` (default) return the same bytes, `1` (changeable) and `3` (saved) are
+rejected with ILLEGAL REQUEST `5/0x24`, as are unimplemented page codes.
+The response is truncated to the allocation length.
 
 The normal build retains the existing policy: timeout starts Android and
 Volume Up enters GBL Fastboot. Do not add `--auto` to this procedure: that
@@ -209,6 +261,39 @@ a distinct MSC serial string. It does not allocate a new product ID;
 host driver binding, particularly Windows' cached Fastboot bindings, remains
 part of hardware validation. No USB Host or UAS support is added.
 
+A refused data-in command answers with a **short data stage followed by CSW
+status 1** (CHECK CONDITION), not with a stalled IN endpoint: hosts turn a
+stalled data phase into bulk-only reset recovery, which hides the sense data
+(Linux then reports a bare I/O error instead of `ILLEGAL REQUEST`). The short
+packet is deliberately *not* a zero-length transfer: the firmware ends such a
+data stage with `min(host length, bulk packet - 1)` bytes, a single non-full
+packet at every supported speed, so the host's transfer always ends without
+depending on the controller turning a zero-length URB into a ZLP. The bytes
+carry no meaning; the CSW status is authoritative, and the CSW residue counts
+them as transferred so hosts do not see a phantom shortfall. Verified on the
+device: `mode6_pc1` comes back as `CHECK CONDITION 5/0x24` with the framed data
+stage in the buffer and `dCSWDataResidue` of zero. The same rule covers `MODE SENSE`
+page-control/page refusals, reads past the end of the medium, and any answer
+truncated to zero bytes by the allocation length.
+
+## Automated device self-test
+
+`tests/device/msc_selftest.sh` wraps the whole procedure. The Android phase
+(`prepare`) is read-only: it locates a file that is already on a mounted FAT
+volume (by default `/EFI/BOOT/BOOTAA64.EFI`) and records its path, size and
+SHA-256 in `local/msc-selftest.env`; nothing is created on the device. Only
+`prepare --write` generates a deterministic 5 MiB + 1234 byte file and copies
+it to `EFI/GBLMSC/selftest.bin`, for devices where no usable file exists yet.
+
+The GBL Fastboot phase (`run`) exports that file as `file:` and `iso:`,
+verifies logical block size, read-only flag, padded capacity, content hash,
+INQUIRY type, `MODE SENSE` header/block descriptor/pages and the MMC
+commands, tries a write on each LUN, and ejects back to Fastboot. A `mixed`
+case exports `boot_a` together with the file LUN, and the reference hash comes
+from the device's own `sha256sum` of the recorded file. See
+[tests/device/README.md](../../tests/device/README.md) for the options; the
+offline replay of the script itself is `tests/host/105_msc_selftest.sh`.
+
 ## Host validation
 
 ```bash
@@ -234,7 +319,13 @@ Volume Down and Escape exits while checking DMA and media cleanup. Both
 the default command guard and opt-in command path are compiled and tested.
 Additional cases cover four-LUN REPORT LUNS, LUN selection, invalid LUN
 sense, 4 KiB logical blocks, READ CAPACITY 16, VERIFY(10), and deterministic
-write rejection.
+write rejection. Mode-sense coverage checks both CDB sizes, the block
+descriptor, the DBD bit, page `0x08`/`0x0a`/`0x3f`/`0x00`, the rejected page
+controls and page codes, and allocation-length truncation. File media
+coverage drives a mocked `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL` and
+`EFI_FILE_PROTOCOL`: ISO/file block sizes, CD-ROM INQUIRY, zero padding of a
+short final block, `fsN:` selection, path normalisation, directory/empty
+file rejection, and a read error propagating as CHECK CONDITION.
 
 These are simulated protocol and build checks, not proof that a particular
 phone enumerates MSC correctly. No device commands run as part of the test.

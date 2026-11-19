@@ -36,11 +36,11 @@ echo "== building opt-in read-only partition-export firmware =="
 ./scripts/build.sh --experimental-usb-msc-partition-export --no-recovery --no-host
 test -f dist/gbl-chainload-msc-partitions.efi \
   || { echo "FAIL: dist/gbl-chainload-msc-partitions.efi missing"; exit 1; }
-if ! grep -aFq 'partition export is disabled in this build' dist/gbl-chainload.efi; then
+if ! grep -aFq 'media export is disabled in this build' dist/gbl-chainload.efi; then
   echo 'FAIL: normal firmware lost the partition-export guard' >&2
   exit 1
 fi
-if grep -aFq 'partition export is disabled in this build' dist/gbl-chainload-msc-partitions.efi; then
+if grep -aFq 'media export is disabled in this build' dist/gbl-chainload-msc-partitions.efi; then
   echo 'FAIL: experimental firmware still has the disabled-export guard' >&2
   exit 1
 fi
