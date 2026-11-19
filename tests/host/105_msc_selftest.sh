@@ -82,6 +82,7 @@ case "$1" in
       case "$part" in
         iso:*) model="ISO IMAGE"; block=2048 ;;
         file:*) model="FILE IMAGE"; block=512 ;;
+        ram:*) model="RAM disk"; block=512 ;;
         *) model="PARTITION"; block=4096 ;;
       esac
       if [ "$model" = "ISO IMAGE" ]; then
@@ -96,7 +97,7 @@ case "$1" in
       printf '%-16s\n' "$model" > "$dir/device/model"
       echo "$block" > "$dir/queue/logical_block_size"
       echo 1 > "$dir/ro"
-      if [ "$model" = "PARTITION" ]; then
+      if [ "$model" = "PARTITION" ] || [ "$model" = "RAM disk" ]; then
         head -c $((1024 * 1024)) /dev/zero > "$DEVDIR/$name"
       else
         size=$(stat -c %s "$IMG")
@@ -144,12 +145,12 @@ case "$cmd" in
     echo "handle=stub" ;;
   modesense)
     if [ "$model" = "ISO IMAGE" ] && [ "${MSC_STUB_NO_CAPS:-0}" != 1 ]; then
-      echo "mode6.pages=08,0a,2a"
+      echo "mode6.pages=01,08,0a,1c,2a"
       echo "mode6_capabilities.status=ok"
       echo "mode6_capabilities.pages=2a"
       echo "mode6_capabilities.page_length=18"
     else
-      echo "mode6.pages=08,0a"
+      echo "mode6.pages=01,08,0a,1c"
       echo "mode6_capabilities.status=check_condition"
       echo "mode6_capabilities.sense=5/0x24"
     fi
@@ -185,6 +186,14 @@ case "$cmd" in
       echo "event.notification_class=0"
       echo "event.supported_classes=0x10"
     fi
+    echo "handle=stub" ;;
+  write)
+    # A read-only build refuses the block with DATA PROTECT and changes
+    # nothing; the stub never claims a writable LUN.
+    echo "write.last_lba=2047"
+    echo "write.block_size=$block"
+    echo "write.status=refused"
+    echo "write.sense=7/0x27/0x00"
     echo "handle=stub" ;;
   openrw)
     echo "openrw=refused_erofs" ;;
@@ -279,9 +288,12 @@ grep -q "PASS  iso/ISO IMAGE one data track at LBA 0" "$work/run.log"
 # A CD-ROM LUN is bound by sr_mod, so the harness must look at /dev/sr*, not
 # only /dev/sd*.
 grep -q -- '-- iso/ISO IMAGE: /dev/sr0 (ISO IMAGE)' "$work/run.log"
-grep -q "PASS  iso/ISO IMAGE MODE SENSE pages 08,0a,2a" "$work/run.log"
+grep -q "PASS  iso/ISO IMAGE MODE SENSE pages 01,08,0a,1c,2a" "$work/run.log"
 grep -q "PASS  iso/ISO IMAGE MODE SENSE page 2a capabilities" "$work/run.log"
 grep -q "PASS  file/FILE IMAGE MODE SENSE page 2a rejected on a direct-access LUN" "$work/run.log"
+grep -q "PASS  ram/RAM disk write refused (DATA PROTECT)" "$work/run.log"
+grep -q "PASS  ram/RAM disk content unchanged after a refused write" "$work/run.log"
+grep -q "PASS  ram/RAM disk MODE SENSE pages 01,08,0a,1c" "$work/run.log"
 grep -q "PASS  iso/ISO IMAGE GET EVENT STATUS NOTIFICATION" "$work/run.log"
 grep -q "PASS  iso/ISO IMAGE no media event pending (NEA)" "$work/run.log"
 grep -q "PASS  iso/ISO IMAGE media event class advertised" "$work/run.log"
@@ -301,7 +313,7 @@ grep -q "FAIL  file/FILE IMAGE MODE SENSE WP bit is 0" "$work/wp.log"
 
 echo "== run (an optical LUN without page 0x2a must fail) =="
 MSC_STUB_NO_CAPS=1 run_selftest bash "$script" run --cases iso >"$work/nocaps.log" 2>&1 && exit 1 || true
-grep -q "FAIL  iso/ISO IMAGE MODE SENSE pages 08,0a (expected 08,0a,2a)" "$work/nocaps.log"
+grep -q "FAIL  iso/ISO IMAGE MODE SENSE pages 01,08,0a,1c (expected 01,08,0a,1c,2a)" "$work/nocaps.log"
 grep -q "FAIL  iso/ISO IMAGE MODE SENSE page 2a not implemented" "$work/nocaps.log"
 
 echo "== run (a missing media event class must fail) =="

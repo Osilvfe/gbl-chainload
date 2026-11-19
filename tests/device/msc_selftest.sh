@@ -29,7 +29,7 @@ PROBE=$ROOT/tests/device/msc_probe.py
 
 DRY_RUN=0
 KEEP_MSC=0
-CASES=${MSC_CASES:-"file iso mixed"}
+CASES=${MSC_CASES:-"file iso mixed ram"}
 LUN_TIMEOUT=${MSC_LUN_TIMEOUT:-30}
 TEST_SIZE=$((5 * 1024 * 1024 + 1234))   # not a multiple of 512 or 2048
 FW_DIR=EFI/GBLMSC
@@ -65,7 +65,12 @@ usage: tests/device/msc_selftest.sh <command> [options]
           the host devices (logical block size, read-only flag, capacity,
           content hash, write rejection, INQUIRY, MODE SENSE, and MMC
           GET CONFIGURATION / READ TOC for the ISO LUN), then ejects so the
-          phone returns to Fastboot. Cases: file iso mixed.
+          phone returns to Fastboot. Cases: file iso mixed ram.
+
+          The ram case exports the in-memory LUN and probes WRITE: a read-only
+          build must refuse it with DATA PROTECT, a writable build must accept
+          it, show the bytes on the next read, flush, and leave the medium as
+          it found it.
 
   status          Show the test file record and any GBL LUNs visible now.
   volumes         List the vfat volumes Android has mounted, with their
@@ -490,10 +495,12 @@ verify_file_lun() { # <row> <expected-block-size> <expected-type> <label>
       || fail "$label MODE SENSE block descriptor under DBD=0 is ${d0lbd:-missing} (expected 8)"
     [ "$d0bll" = "$block" ] && pass "$label MODE SENSE block length $d0bll" \
       || fail "$label MODE SENSE block length ${d0bll:-missing} (expected $block)"
-    # The capabilities page 0x2a belongs to optical LUNs only; a direct-access
-    # LUN that listed it would be claiming CD behaviour it cannot deliver.
-    local want_pages=08,0a
-    [ "$ptype" = "5" ] && want_pages=08,0a,2a
+    # Every LUN reports error recovery (0x01), caching (0x08), control (0x0a)
+    # and informational exceptions (0x1c); the capabilities page 0x2a belongs
+    # to optical LUNs only, and a direct-access LUN that listed it would be
+    # claiming CD behaviour it cannot deliver.
+    local want_pages=01,08,0a,1c
+    [ "$ptype" = "5" ] && want_pages=01,08,0a,1c,2a
     [ "$pages" = "$want_pages" ] && pass "$label MODE SENSE pages $pages" \
       || fail "$label MODE SENSE pages ${pages:-none} (expected $want_pages)"
     if [ "$ptype" = "5" ]; then
@@ -578,6 +585,70 @@ describe_luns() { # <start-epoch>
   printf '%s\n' "$out" | sed 's/^/     /'
 }
 
+# The RAM LUN carries no reference file, so its checks are self-contained: a
+# 1 MiB direct-access medium, the same MODE SENSE pages as every other LUN,
+# and a write probe that distinguishes a read-only build from a writable one.
+verify_ram_lun() { # <row> <label>
+  local row=$1 label=$2
+  local dev model lb ro sec out pages sense
+  dev=$(row_field "$row" 1); model=$(row_field "$row" 2)
+  lb=$(row_field "$row" 3); ro=$(row_field "$row" 4); sec=$(row_field "$row" 5)
+
+  say "-- $label: /dev/$dev ($model)"
+  [ "$lb" = "512" ] && pass "$label logical_block_size=512" \
+    || fail "$label logical_block_size=$lb (expected 512)"
+  if [ "$sec" = "2048" ]; then
+    pass "$label capacity 1048576 bytes, 2048 blocks of 512"
+  else
+    fail "$label capacity $sec sectors (expected 2048)"
+  fi
+  note "$label read-only flag $ro (0 only in a build with write support)"
+
+  out=$(probe info "$DEV_PREFIX$dev" || true)
+  if printf '%s' "$out" | grep -qx "inquiry.status=ok"; then
+    local got_type
+    got_type=$(printf '%s' "$out" | sed -n 's/^inquiry.type=//p')
+    [ "$got_type" = "0" ] && pass "$label INQUIRY peripheral type 0" \
+      || fail "$label INQUIRY peripheral type $got_type (expected 0)"
+    printf '%s\n' "$out" | sed -n 's/^inquiry.revision=/         product revision=/p'
+  else
+    fail "$label INQUIRY failed: $(printf '%s' "$out" | tr '\n' ' ')"
+  fi
+
+  out=$(probe modesense "$DEV_PREFIX$dev" || true)
+  pages=$(printf '%s' "$out" | sed -n 's/^mode6\.pages=//p')
+  [ "$pages" = "01,08,0a,1c" ] && pass "$label MODE SENSE pages $pages" \
+    || fail "$label MODE SENSE pages ${pages:-none} (expected 01,08,0a,1c)"
+  printf '%s' "$out" | grep -qx "mode6_capabilities.status=check_condition" \
+    && pass "$label page 2a refused (not an optical LUN)" \
+    || fail "$label page 2a accepted on a RAM disk"
+
+  # One block at the very end of the medium: the probe puts the original bytes
+  # back and flushes, so a writable LUN is left exactly as it was found.
+  out=$(probe write "$DEV_PREFIX$dev" || true)
+  if printf '%s' "$out" | grep -qx "write.status=refused"; then
+    sense=$(printf '%s' "$out" | sed -n 's/^write\.sense=//p')
+    [ "$sense" = "7/0x27/0x00" ] && pass "$label write refused (DATA PROTECT)" \
+      || fail "$label write refused with sense ${sense:-none} (expected 7/0x27/0x00)"
+    if write_probe "$dev" 512; then
+      pass "$label content unchanged after a refused write"
+    else
+      fail "$label a refused write still changed the content"
+    fi
+  elif printf '%s' "$out" | grep -qx "write.status=ok"; then
+    printf '%s' "$out" | grep -qx "write.readback=match" \
+      && pass "$label write visible to the next read" || fail "$label write not visible on read back"
+    printf '%s' "$out" | grep -qx "write.sync=ok" \
+      && pass "$label SYNCHRONIZE CACHE" || fail "$label SYNCHRONIZE CACHE failed"
+    printf '%s' "$out" | grep -qx "write.restore=ok" \
+      && pass "$label original block restored" || fail "$label could not restore the original block"
+    printf '%s' "$out" | grep -qx "write.restore_sync=ok" \
+      && pass "$label restore flushed" || fail "$label restore flush failed"
+  else
+    fail "$label write probe failed: $(printf '%s' "$out" | tr '\n' ' ')"
+  fi
+}
+
 run_case() { # <label> <spec> <expected model:block:type> [<expected model:block:type> ...]
   local label=$1 spec=$2
   shift 2
@@ -625,6 +696,8 @@ run_case() { # <label> <spec> <expected model:block:type> [<expected model:block
       [ "$ro" = "1" ] && pass "$label partition LUN read-only" || fail "$label partition LUN ro=$ro"
       [ "$lb" -ge 512 ] && pass "$label partition logical block size $lb" \
         || fail "$label partition logical block size $lb"
+    elif [ "$model" = "RAM disk" ]; then
+      verify_ram_lun "$row" "$label/$model"
     else
       verify_file_lun "$row" "$block" "$ptype" "$label/$model"
       local first
@@ -715,6 +788,7 @@ cmd_run() {
       file)  run_case file "file:$MSC_PATH" "FILE IMAGE:512:0" || true ;;
       iso)   run_case iso "iso:$MSC_PATH" "ISO IMAGE:2048:5" || true ;;
       mixed) run_case mixed "boot_a,file:$MSC_PATH" "PARTITION:*:0" "FILE IMAGE:512:0" || true ;;
+      ram)   run_case ram "ram:" "RAM disk:*:0" || true ;;
       *) die "unknown case: $case" ;;
     esac
   done

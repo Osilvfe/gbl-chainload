@@ -200,6 +200,19 @@ STATIC EFI_STATUS EFIAPI HandleProtocol (EFI_HANDLE Handle, EFI_GUID *Guid, VOID
   abort ();
 }
 
+/*
+ * A 64 KiB overlay stands in for the partition's first blocks: writes land
+ * there and reads prefer it, so a write followed by a read observes the write
+ * exactly as the real BlockIo would. Anything outside the overlay is the
+ * deterministic pattern the read mock generates.
+ */
+#define MOCK_FLASH_BYTES 65536U
+STATIC UINT8 mFlash[MOCK_FLASH_BYTES];
+STATIC UINTN mFlashLength;
+STATIC UINTN mBlockWrites;
+STATIC UINTN mBlockFlushes;
+STATIC EFI_STATUS mBlockWriteStatus;
+
 STATIC EFI_STATUS EFIAPI ReadBlocks (EFI_BLOCK_IO_PROTOCOL *BlockIo, UINT32 MediaId,
                                      EFI_LBA Lba, UINTN Size, VOID *Buffer) {
   UINTN Index;
@@ -211,15 +224,27 @@ STATIC EFI_STATUS EFIAPI ReadBlocks (EFI_BLOCK_IO_PROTOCOL *BlockIo, UINT32 Medi
   assert (Media->IoAlign <= 1 || (UINTN)Buffer % Media->IoAlign == 0);
   mBlockReads++;
   if (EFI_ERROR (mBlockReadStatus)) return mBlockReadStatus;
-  for (Index = 0; Index < Size; Index++) Bytes[Index] = PartitionByte (Lba * Media->BlockSize + Index);
+  for (Index = 0; Index < Size; Index++) {
+    UINT64 At = Lba * Media->BlockSize + Index;
+    Bytes[Index] = At < mFlashLength ? mFlash[At] : PartitionByte (At);
+  }
   if (mChangeMediaDuringRead) Media->MediaId++;
   return EFI_SUCCESS;
 }
 
 STATIC EFI_STATUS EFIAPI WriteBlocks (EFI_BLOCK_IO_PROTOCOL *BlockIo, UINT32 MediaId,
                                       EFI_LBA Lba, UINTN Size, VOID *Buffer) {
-  (VOID)BlockIo; (VOID)MediaId; (VOID)Lba; (VOID)Size; (VOID)Buffer;
-  abort ();
+  EFI_BLOCK_IO_MEDIA *Media = BlockIo->Media;
+  UINTN Offset = (UINTN)(Lba * Media->BlockSize);
+  assert (MediaId == Media->MediaId && Media->MediaPresent && Media->LogicalPartition);
+  assert (Size != 0 && Size <= 65536 && Size % Media->BlockSize == 0);
+  assert (Media->IoAlign <= 1 || (UINTN)Buffer % Media->IoAlign == 0);
+  mBlockWrites++;
+  if (EFI_ERROR (mBlockWriteStatus)) return mBlockWriteStatus;
+  assert (Offset + Size <= MOCK_FLASH_BYTES);
+  memcpy (mFlash + Offset, Buffer, Size);
+  if (Offset + Size > mFlashLength) mFlashLength = Offset + Size;
+  return EFI_SUCCESS;
 }
 
 STATIC EFI_STATUS EFIAPI ResetBlock (EFI_BLOCK_IO_PROTOCOL *BlockIo, BOOLEAN Extended) {
@@ -229,7 +254,8 @@ STATIC EFI_STATUS EFIAPI ResetBlock (EFI_BLOCK_IO_PROTOCOL *BlockIo, BOOLEAN Ext
 
 STATIC EFI_STATUS EFIAPI FlushBlock (EFI_BLOCK_IO_PROTOCOL *BlockIo) {
   (VOID)BlockIo;
-  abort ();
+  mBlockFlushes++;
+  return EFI_SUCCESS;
 }
 
 STATIC VOID SetPartition (UINTN Index, CONST CHAR8 *Name, UINT32 BlockSize, UINT64 Size) {
@@ -771,6 +797,11 @@ STATIC VOID ResetMocks (VOID) {
   mBlockReads = 0;
   mBlockReadStatus = EFI_SUCCESS;
   mChangeMediaDuringRead = FALSE;
+  mBlockWrites = 0;
+  mBlockFlushes = 0;
+  mBlockWriteStatus = EFI_SUCCESS;
+  mFlashLength = 0;
+  memset (mFlash, 0, sizeof (mFlash));
   mUnlocked = TRUE;
   SetPartition (0, "boot_a", 512, 96U * 1024U * 1024U);
 }
@@ -1548,41 +1579,57 @@ STATIC VOID CommandTests (VOID) {
 STATIC VOID ModeSenseTests (VOID) {
   GBL_MSC_BOT Bot;
   UINT8 Cbw[31];
-  UINT8 Data[64];
+  UINT8 Data[96];
 
   GblMscMakeDisk (mDisk);
   GblMscBotInit (&Bot, mDisk, sizeof (mDisk));
-  /* All pages, current values, block descriptor present: 4 + 8 + 20 + 10. */
-  MakeCbw (Cbw, 0x1a, 6, 64, TRUE);
+  /* All pages, current values, block descriptor present:
+   * 4 + 8 + 12 (0x01) + 20 (0x08) + 10 (0x0a) + 10 (0x1c). */
+  MakeCbw (Cbw, 0x1a, 6, 96, TRUE);
   Cbw[17] = 0x3f;
-  Cbw[19] = 64;
+  Cbw[19] = 96;
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0);
-  assert (Bot.InLength == 42);
-  assert (GblMscBotRead (&Bot, 0, Data, 42) == EFI_SUCCESS);
-  assert (Data[0] == 41 && Data[1] == 0 && Data[2] == 0x80 && Data[3] == 8);
+  assert (Bot.InLength == 64);
+  assert (GblMscBotRead (&Bot, 0, Data, 64) == EFI_SUCCESS);
+  assert (Data[0] == 63 && Data[1] == 0 && Data[2] == 0x80 && Data[3] == 8);
   /* Block descriptor: density 0, 2048 blocks of 512 bytes. */
   assert (Data[4] == 0 && Data[5] == 0 && Data[6] == 8 && Data[7] == 0);
   assert (Data[8] == 0 && Data[9] == 0 && Data[10] == 2 && Data[11] == 0);
+  /* Read/write error recovery: every automatic action stays off. */
+  assert (Data[12] == 0x01 && Data[13] == 10);
+  assert (Data[14] == 0 && Data[15] == 0 && Data[23] == 0);
   /* Caching page: write cache disabled so hosts report "write through". */
-  assert (Data[12] == 0x08 && Data[13] == 18 && Data[14] == 0 && Data[15] == 0);
+  assert (Data[24] == 0x08 && Data[25] == 18 && Data[26] == 0 && Data[27] == 0);
   /* Control page: fixed-format sense data, no saved log parameters. */
-  assert (Data[32] == 0x0a && Data[33] == 8 && Data[34] == 0x04);
+  assert (Data[44] == 0x0a && Data[45] == 8 && Data[46] == 0x04);
+  /* Informational exceptions: nothing logged, TEST off. */
+  assert (Data[54] == 0x1c && Data[55] == 8 && Data[56] == 0);
   /* DBD suppresses the block descriptor. */
   Cbw[16] = 0x08;
   Cbw[17] = 0x3f;
-  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 34);
-  assert (GblMscBotRead (&Bot, 0, Data, 34) == EFI_SUCCESS);
-  assert (Data[0] == 33 && Data[3] == 0 && Data[4] == 0x08 && Data[5] == 18);
-  assert (Data[24] == 0x0a && Data[25] == 8);
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 56);
+  assert (GblMscBotRead (&Bot, 0, Data, 56) == EFI_SUCCESS);
+  assert (Data[0] == 55 && Data[3] == 0 && Data[4] == 0x01 && Data[5] == 10);
+  assert (Data[16] == 0x08 && Data[17] == 18);
+  assert (Data[36] == 0x0a && Data[37] == 8);
+  assert (Data[46] == 0x1c && Data[47] == 8);
   /* Page code 0 returns only the header and block descriptor. */
   Cbw[16] = 0;
   Cbw[17] = 0;
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 12);
   assert (GblMscBotRead (&Bot, 0, Data, 12) == EFI_SUCCESS);
   assert (Data[0] == 11 && Data[3] == 8 && Data[4] == 0 && Data[10] == 2);
-  /* Single caching page. */
+  /* Single pages, block descriptor still present (DBD is clear). */
   Cbw[17] = 0x08;
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 32);
+  Cbw[17] = 0x01;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 24);
+  assert (GblMscBotRead (&Bot, 0, Data, 24) == EFI_SUCCESS);
+  assert (Data[12] == 0x01 && Data[13] == 10);
+  Cbw[17] = 0x1c;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 22);
+  assert (GblMscBotRead (&Bot, 0, Data, 22) == EFI_SUCCESS);
+  assert (Data[12] == 0x1c && Data[13] == 8 && Data[14] == 0);
   /* Default values are identical to current values. */
   Cbw[17] = 0x88;
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 32);
@@ -1602,20 +1649,22 @@ STATIC VOID ModeSenseTests (VOID) {
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 4);
   Cbw[19] = 0;
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 0);
-  /* MODE SENSE(10) uses the 8-byte header: 8 + 8 + 20 + 10. */
-  MakeCbw (Cbw, 0x5a, 10, 64, TRUE);
+  /* MODE SENSE(10) uses the 8-byte header: 8 + 8 + 12 + 20 + 10 + 10. */
+  MakeCbw (Cbw, 0x5a, 10, 96, TRUE);
   Cbw[17] = 0x3f;
-  Cbw[23] = 64;
-  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 46);
-  assert (GblMscBotRead (&Bot, 0, Data, 46) == EFI_SUCCESS);
-  assert (Data[0] == 0 && Data[1] == 44 && Data[2] == 0 && Data[3] == 0x80);
+  Cbw[23] = 96;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 68);
+  assert (GblMscBotRead (&Bot, 0, Data, 68) == EFI_SUCCESS);
+  assert (Data[0] == 0 && Data[1] == 66 && Data[2] == 0 && Data[3] == 0x80);
   assert (Data[4] == 0 && Data[5] == 0 && Data[6] == 0 && Data[7] == 8);
   assert (Data[8] == 0 && Data[9] == 0 && Data[10] == 8 && Data[11] == 0);
   assert (Data[12] == 0 && Data[13] == 0 && Data[14] == 2 && Data[15] == 0);
-  assert (Data[16] == 0x08 && Data[17] == 18);
-  assert (Data[36] == 0x0a && Data[37] == 8);
+  assert (Data[16] == 0x01 && Data[17] == 10);
+  assert (Data[28] == 0x08 && Data[29] == 18);
+  assert (Data[48] == 0x0a && Data[49] == 8);
+  assert (Data[58] == 0x1c && Data[59] == 8);
   Cbw[16] = 0x08;
-  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 38);
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 60);
   Cbw[16] = 0;
   Cbw[23] = 9;
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 9);
@@ -1718,7 +1767,7 @@ STATIC VOID IsoScsiTests (VOID) {
   GBL_MSC_MEDIA Media;
   GBL_MSC_BOT Bot;
   UINT8 Cbw[31];
-  UINT8 Data[64];
+  UINT8 Data[128];
 
   GblMscMakeDisk (mDisk);
   ResetMocks ();
@@ -1740,12 +1789,13 @@ STATIC VOID IsoScsiTests (VOID) {
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 8);
   assert (GblMscBotRead (&Bot, 0, Data, 8) == EFI_SUCCESS);
   assert (Data[3] == 1 && Data[4] == 0 && Data[6] == 8 && Data[7] == 0);
-  /* Block descriptor uses the ISO block size. */
-  MakeCbw (Cbw, 0x1a, 6, 64, TRUE);
+  /* Block descriptor uses the ISO block size. All pages, DBD clear:
+   * 4 + 8 + 12 + 20 + 10 + 10 + 20. */
+  MakeCbw (Cbw, 0x1a, 6, 96, TRUE);
   Cbw[17] = 0x3f;
-  Cbw[19] = 64;
-  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 62);
-  assert (GblMscBotRead (&Bot, 0, Data, 62) == EFI_SUCCESS);
+  Cbw[19] = 96;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 84);
+  assert (GblMscBotRead (&Bot, 0, Data, 84) == EFI_SUCCESS);
   assert (Data[5] == 0 && Data[6] == 0 && Data[7] == 2);
   assert (Data[9] == 0 && Data[10] == 8 && Data[11] == 0);
   /* GET CONFIGURATION advertises the CD-ROM profile only: the data length
@@ -1775,11 +1825,15 @@ STATIC VOID IsoScsiTests (VOID) {
   /* 4-byte header, 8-byte block descriptor, then the 20-byte page. */
   assert (Data[12] == 0x2a && Data[13] == 18);
   assert (Data[14] == 0 && Data[15] == 0 && Data[16] == 0 && Data[31] == 0);
-  /* "All pages" lists it after the caching and control pages. */
+  /* "All pages" lists it after the caching, control and informational pages,
+   * in ascending page-code order. */
+  MakeCbw (Cbw, 0x1a, 6, 96, TRUE);
   Cbw[17] = 0x3f;
-  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 62);
-  assert (GblMscBotRead (&Bot, 0, Data, 62) == EFI_SUCCESS);
-  assert (Data[12] == 0x08 && Data[32] == 0x0a && Data[42] == 0x2a && Data[43] == 18);
+  Cbw[19] = 96;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 84);
+  assert (GblMscBotRead (&Bot, 0, Data, 84) == EFI_SUCCESS);
+  assert (Data[12] == 0x01 && Data[24] == 0x08 && Data[44] == 0x0a &&
+          Data[54] == 0x1c && Data[64] == 0x2a && Data[65] == 18);
   /* GET EVENT STATUS NOTIFICATION never queues a media event: the image
    * cannot be ejected or replaced, so the answer stays NEA. */
   MakeCbw (Cbw, 0x4a, 10, 8, TRUE);
@@ -1836,6 +1890,218 @@ STATIC VOID IsoScsiTests (VOID) {
   ResetMocks ();
 }
 
+/*
+ * The write backend: which LUNs accept writes, that a write is visible to the
+ * next read in command order, that SYNCHRONIZE CACHE is a real barrier, that
+ * range checks and MODE SELECT behave, and that nothing outside a writable
+ * LUN can be touched.
+ */
+STATIC VOID WriteBackendTests (VOID) {
+  GBL_MSC_MEDIA Media;
+  GBL_MSC_BOT Bot;
+  UINT8 Cbw[31];
+  UINT8 Payload[1024];
+  UINT8 Data[1024];
+#if GBL_USB_MSC_WRITE
+  UINT8 List[32];
+#endif
+  UINTN Index;
+
+  ResetMocks ();
+  /* Sized in-memory media: the default 1 MiB image, an explicit KiB size, and
+   * the bounds that must be refused before anything is allocated. */
+  assert (GblMscMediaOpen ("ram:", &Media) == EFI_SUCCESS);
+  assert (Media.Size == GBL_MSC_DISK_SIZE && Media.BlockSize == 512);
+  assert (Media.Write == NULL || Media.Writable);
+  GblMscMediaClose (&Media);
+  assert (GblMscMediaOpen ("ram:64", &Media) == EFI_SUCCESS);
+  assert (Media.Size == 65536);
+  assert (Media.Read (Media.Context, Media.Size - 512, Data, 512) == EFI_SUCCESS);
+  for (Index = 0; Index < 512; Index++) assert (Data[Index] == 0);
+  GblMscMediaClose (&Media);
+  assert (GblMscMediaOpen ("ram:1", &Media) == EFI_INVALID_PARAMETER);
+  assert (GblMscMediaOpen ("ram:0", &Media) == EFI_INVALID_PARAMETER);
+  assert (GblMscMediaOpen ("ram:65537", &Media) == EFI_INVALID_PARAMETER);
+  assert (GblMscMediaOpen ("ram:16x", &Media) == EFI_INVALID_PARAMETER);
+  assert (GblMscMediaOpen ("ram:512", &Media) == EFI_SUCCESS);
+  assert (Media.Size == 512U * 1024U);
+  GblMscMediaClose (&Media);
+
+  /* A read-only LUN still refuses every write, whatever the build. */
+  assert (GblMscMediaOpen ("ram:", &Media) == EFI_SUCCESS);
+  GblMscBotInitMedia (&Bot, &Media);
+  MakeCbw (Cbw, 0x28, 10, 512, TRUE);
+  Cbw[20] = 64;
+  Cbw[23] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0);
+  assert (GblMscBotRead (&Bot, 0, Data, 512) == EFI_SUCCESS);
+  MakeCbw (Cbw, 0x2a, 10, 512, FALSE);
+  Cbw[20] = 64;
+  Cbw[23] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (Bot.Writable == Media.Writable);
+  if (!Media.Writable) {
+    assert (Bot.Status == 1 && Bot.SenseKey == 7 && Bot.Asc == 0x27);
+    assert (!Bot.ToDisk && Bot.OutLength == 512);
+    memset (Payload, 0xaa, sizeof (Payload));
+    assert (GblMscBotWrite (&Bot, 0, Payload, 512) == EFI_SUCCESS);
+    /* Nothing changed: read the same block again. */
+    MakeCbw (Cbw, 0x28, 10, 512, TRUE);
+    Cbw[20] = 64;
+    Cbw[23] = 1;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+    assert (GblMscBotRead (&Bot, 0, Payload, 512) == EFI_SUCCESS);
+    assert (memcmp (Payload, Data, 512) == 0);
+  }
+#if GBL_USB_MSC_WRITE
+  else {
+    /* WRITE(10) of two blocks, delivered in two bulk-sized chunks. */
+    for (Index = 0; Index < sizeof (Payload); Index++) {
+      Payload[Index] = (UINT8)(Index * 7U + 3U);
+    }
+    MakeCbw (Cbw, 0x2a, 10, 1024, FALSE);
+    Cbw[20] = 64;
+    Cbw[23] = 2;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+    assert (Bot.Status == 0 && Bot.ToDisk && Bot.OutLength == 1024 && !Bot.Dirty);
+    assert (GblMscBotWrite (&Bot, 0, Payload, 512) == EFI_SUCCESS);
+    assert (GblMscBotWrite (&Bot, 512, Payload + 512, 512) == EFI_SUCCESS);
+    assert (Bot.Dirty);
+    /* The next read sees the written bytes, in order. */
+    MakeCbw (Cbw, 0x28, 10, 1024, TRUE);
+    Cbw[20] = 64;
+    Cbw[23] = 2;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 1024);
+    assert (GblMscBotRead (&Bot, 0, Data, 1024) == EFI_SUCCESS);
+    assert (memcmp (Data, Payload, 1024) == 0);
+    /* SYNCHRONIZE CACHE is a barrier and clears the dirty flag. */
+    MakeCbw (Cbw, 0x35, 10, 0, FALSE);
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0 && !Bot.Dirty);
+    /* A write past the end is refused and stays clean. LBA bytes are CBW
+     * bytes 17..20 for a ten-byte CDB. */
+    MakeCbw (Cbw, 0x2a, 10, 512, FALSE);
+    Cbw[17] = 0xff;
+    Cbw[18] = 0xff;
+    Cbw[19] = 0xff;
+    Cbw[20] = 0xff;
+    Cbw[23] = 1;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+    assert (Bot.Status == 1 && Bot.SenseKey == 5 && Bot.Asc == 0x21 && !Bot.ToDisk);
+    /* MODE SELECT(6): the caching page with WCE clear is accepted. */
+    memset (List, 0, sizeof (List));
+    List[0] = 24;
+    List[4] = 0x08;
+    List[5] = 0x12;
+    MakeCbw (Cbw, 0x15, 6, 24, FALSE);
+    Cbw[19] = 24;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+    assert (Bot.Status == 0 && Bot.ParamList == 1 && Bot.OutLength == 24);
+    assert (GblMscBotWrite (&Bot, 0, List, 24) == EFI_SUCCESS && Bot.Status == 0);
+    /* Asking for the write cache to be switched on is refused. */
+    List[6] = 0x04;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0);
+    assert (GblMscBotWrite (&Bot, 0, List, 24) == EFI_SUCCESS);
+    assert (Bot.Status == 1 && Bot.SenseKey == 5 && Bot.Asc == 0x26);
+    /* An unknown page in the list is refused. */
+    List[6] = 0;
+    List[4] = 0x0e;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+    assert (GblMscBotWrite (&Bot, 0, List, 24) == EFI_SUCCESS);
+    assert (Bot.Status == 1 && Bot.SenseKey == 5 && Bot.Asc == 0x26);
+    /* A page whose declared length runs past the list is a length error, and
+     * a list longer than the buffer is refused before the data stage. A list
+     * that stops short of its declared length is caught by the transport
+     * residue instead, so it never reaches the validator. */
+    List[4] = 0x08;
+    List[5] = 0x20;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+    assert (Bot.Status == 0);
+    assert (GblMscBotWrite (&Bot, 0, List, 24) == EFI_SUCCESS);
+    assert (Bot.Status == 1 && Bot.SenseKey == 5 && Bot.Asc == 0x1a);
+    List[5] = 0x12;
+    MakeCbw (Cbw, 0x15, 6, 200, FALSE);
+    Cbw[19] = 200;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 0 &&
+            Bot.SenseKey == 5 && Bot.Asc == 0x1a);
+    /* MODE SELECT(10) with a valid list is accepted too: its header is eight
+     * bytes, so the caching page starts at offset 8. */
+    memset (List, 0, sizeof (List));
+    List[8] = 0x08;
+    List[9] = 0x12;
+    MakeCbw (Cbw, 0x55, 10, 28, FALSE);
+    Cbw[22] = 0;
+    Cbw[23] = 28;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.ParamList == 2);
+    assert (GblMscBotWrite (&Bot, 0, List, 28) == EFI_SUCCESS && Bot.Status == 0);
+  }
+#endif
+  GblMscMediaClose (&Media);
+  assert (Media.Context == NULL && Media.Write == NULL);
+
+#if GBL_USB_MSC_WRITE_PARTITIONS
+  /* Opt-in partition writes go through BlockIo and are flushed for real. */
+  ResetMocks ();
+  assert (GblMscMediaOpen ("rw:boot_a", &Media) == EFI_SUCCESS);
+  assert (Media.IsPartition && Media.Writable);
+  assert (memcmp (Media.Serial, "GBLRW-", 6) == 0);
+  GblMscBotInitMedia (&Bot, &Media);
+  memset (Payload, 0x5a, 512);
+  MakeCbw (Cbw, 0x2a, 10, 512, FALSE);
+  Cbw[23] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0 && Bot.ToDisk);
+  assert (GblMscBotWrite (&Bot, 0, Payload, 512) == EFI_SUCCESS);
+  assert (mBlockWrites == 1 && mBlockFlushes == 0);
+  MakeCbw (Cbw, 0x28, 10, 512, TRUE);
+  Cbw[23] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotRead (&Bot, 0, Data, 512) == EFI_SUCCESS);
+  assert (memcmp (Data, Payload, 512) == 0);
+  /* A partial block is read-modify-written, never half updated. */
+  memset (Payload, 0xa5, 100);
+  MakeCbw (Cbw, 0x2a, 10, 100, FALSE);
+  Cbw[23] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotWrite (&Bot, 0, Payload, 100) == EFI_SUCCESS);
+  assert (mBlockWrites == 2 && mBlockReads >= 2);
+  /* SYNCHRONIZE CACHE reaches BlockIo->FlushBlocks. */
+  MakeCbw (Cbw, 0x35, 10, 0, FALSE);
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0);
+  assert (mBlockFlushes == 1 && !Bot.Dirty);
+  /* A table change mid-session aborts the write with MEDIA CHANGED. */
+  mBlockMedia[0].MediaId++;
+  MakeCbw (Cbw, 0x2a, 10, 512, FALSE);
+  Cbw[23] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotWrite (&Bot, 0, Payload, 512) == EFI_MEDIA_CHANGED);
+  assert (Bot.SenseKey == 6 && Bot.Asc == 0x28);
+  mBlockMedia[0].MediaId--;
+  GblMscMediaClose (&Media);
+  /* Closing a writable LUN flushes it. */
+  assert (mBlockFlushes == 2);
+
+  /* A writable partition must stay away from the GPT. */
+  ResetMocks ();
+  mPartitionEntries[0].StartingLBA = 2;
+  mPartitionEntries[0].EndingLBA = 2 + mBlockMedia[0].LastBlock;
+  assert (GblMscMediaOpen ("rw:boot_a", &Media) == EFI_UNSUPPORTED);
+  assert (Media.Context == NULL);
+
+  /* The read-only spelling of the same partition stays writable-free. */
+  ResetMocks ();
+  assert (GblMscMediaOpen ("ro:boot_a", &Media) == EFI_SUCCESS);
+  assert (!Media.Writable && Media.Write == NULL);
+  assert (memcmp (Media.Serial, "GBLRO-", 6) == 0);
+  GblMscMediaClose (&Media);
+#else
+  /* Without the partition write backend the opt-in is refused outright. */
+  ResetMocks ();
+  assert (GblMscMediaOpen ("rw:boot_a", &Media) == EFI_SECURITY_VIOLATION);
+  assert (GblMscMediaOpen ("ro:boot_a", &Media) == EFI_SUCCESS && !Media.Writable);
+  GblMscMediaClose (&Media);
+#endif
+  ResetMocks ();
+}
+
 int main (int argc, char **argv) {
   if (argc == 2) {
     FILE *Output;
@@ -1855,6 +2121,7 @@ int main (int argc, char **argv) {
   PartitionCommandTests ();
   MultiLunTests ();
   ModeSenseTests ();
+  WriteBackendTests ();
   FileMediaTests ();
   IsoScsiTests ();
   LifecycleTests ();

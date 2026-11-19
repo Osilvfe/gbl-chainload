@@ -94,6 +94,20 @@ def cdb_read_toc(msf=0, fmt=0, alloc=0x100):
                   (alloc >> 8) & 0xFF, alloc & 0xFF, 0])
 
 
+def cdb_read10(lba=0, blocks=1):
+    return bytes([0x28, 0, (lba >> 24) & 0xFF, (lba >> 16) & 0xFF,
+                  (lba >> 8) & 0xFF, lba & 0xFF, 0, (blocks >> 8) & 0xFF, blocks & 0xFF, 0])
+
+
+def cdb_write10(lba=0, blocks=1):
+    return bytes([0x2A, 0, (lba >> 24) & 0xFF, (lba >> 16) & 0xFF,
+                  (lba >> 8) & 0xFF, lba & 0xFF, 0, (blocks >> 8) & 0xFF, blocks & 0xFF, 0])
+
+
+def cdb_sync_cache10():
+    return bytes([0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+
+
 def cdb_get_event_status_notification(rt=1, alloc=0x10):
     return bytes([0x4A, rt & 1, 0, 0, 0, 0, 0, (alloc >> 8) & 0xFF, alloc & 0xFF, 0])
 
@@ -274,10 +288,15 @@ LAST_SB_LEN = 0
 LAST_DATA = b""
 
 
-def sg_io(fd, cdb, data_len=0, direction=SG_DXFER_NONE, timeout_ms=20000):
+def sg_io(fd, cdb, data_len=0, direction=SG_DXFER_NONE, timeout_ms=20000, payload=None):
     global LAST_HOST, LAST_DRIVER, LAST_RESID, LAST_SCSI_STATUS, LAST_DURATION
     global LAST_SB_LEN, LAST_DATA
+    if payload is not None:
+        # A data-out command: the buffer carries the payload the device reads.
+        data_len = len(payload)
     data = ctypes.create_string_buffer(max(data_len, 1))
+    if payload is not None and data_len:
+        ctypes.memmove(data, bytes(payload), data_len)
     sense = ctypes.create_string_buffer(96)
     cmd = ctypes.create_string_buffer(bytes(cdb), len(cdb))
     hdr = SgIoHdr()
@@ -545,6 +564,67 @@ def cmd_mmc(dev):
     return 1 if failures else 0
 
 
+def cmd_write(dev):
+    """Try to write one block, then put the original bytes back.
+
+    The target block is the last block of the medium, so a writable LUN's
+    filesystem metadata is untouched, and the original content is restored
+    before the command returns. A read-only LUN answers DATA PROTECT and
+    nothing is written: that is reported as ``write.status=refused`` with the
+    sense data, not as a failure of the probe itself.
+    """
+    fd, how = open_scsi(dev)
+    failures = 0
+    try:
+        status, sb, data, _ = sg_io(fd, cdb_read_capacity10(), 8, SG_DXFER_FROM_DEV)
+        if status != 0 or len(data) < 8:
+            key, asc, _ = sense_summary(sb) or (-1, -1, -1)
+            print("write.status=check_condition")
+            print("write.sense=%d/0x%02x" % (key, asc & 0xFF))
+            return 1
+        last_lba = int.from_bytes(data[0:4], "big")
+        block = int.from_bytes(data[4:8], "big")
+        print("write.last_lba=%d" % last_lba)
+        print("write.block_size=%d" % block)
+        status, sb, original, _ = sg_io(fd, cdb_read10(last_lba, 1), block, SG_DXFER_FROM_DEV)
+        if status != 0 or len(original) != block:
+            key, asc, _ = sense_summary(sb) or (-1, -1, -1)
+            print("write.status=check_condition")
+            print("write.sense=%d/0x%02x" % (key, asc & 0xFF))
+            return 1
+        pattern = bytes(((i * 37 + 11) & 0xFF) for i in range(block))
+        status, sb, _, _ = sg_io(fd, cdb_write10(last_lba, 1), block, SG_DXFER_TO_DEV,
+                                 payload=pattern)
+        key, asc, ascq = sense_summary(sb) or (-1, -1, -1)
+        if status != 0:
+            print("write.status=refused")
+            print("write.sense=%d/0x%02x/0x%02x" % (key, asc & 0xFF, ascq & 0xFF))
+            transport_facts("write", b"")
+            return 0
+        print("write.status=ok")
+        status, sb, after, _ = sg_io(fd, cdb_read10(last_lba, 1), block, SG_DXFER_FROM_DEV)
+        print("write.readback=%s" % ("match" if status == 0 and after == pattern else "mismatch"))
+        if status != 0 or after != pattern:
+            failures += 1
+        status, sb, _, _ = sg_io(fd, cdb_sync_cache10(), 0, SG_DXFER_NONE)
+        key, asc, _ = sense_summary(sb) or (-1, -1, -1)
+        print("write.sync=%s" % ("ok" if status == 0 else "check_condition"))
+        if status != 0:
+            print("write.sync_sense=%d/0x%02x" % (key, asc & 0xFF))
+            failures += 1
+        status, sb, _, _ = sg_io(fd, cdb_write10(last_lba, 1), block, SG_DXFER_TO_DEV,
+                                 payload=original)
+        print("write.restore=%s" % ("ok" if status == 0 else "check_condition"))
+        if status != 0:
+            failures += 1
+        status, sb, _, _ = sg_io(fd, cdb_sync_cache10(), 0, SG_DXFER_NONE)
+        print("write.restore_sync=%s" % ("ok" if status == 0 else "check_condition"))
+        print("handle=%s" % how)
+    finally:
+        os.close(fd)
+    return 1 if failures else 0
+
+
 def cmd_eject(dev):
     fd, how = open_scsi(dev)
     try:
@@ -801,6 +881,7 @@ def main(argv):
         "info": cmd_info,
         "modesense": cmd_modesense,
         "mmc": cmd_mmc,
+        "write": cmd_write,
         "eject": cmd_eject,
         "openrw": cmd_openrw,
     }
