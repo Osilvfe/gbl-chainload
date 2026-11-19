@@ -1744,8 +1744,8 @@ STATIC VOID IsoScsiTests (VOID) {
   MakeCbw (Cbw, 0x1a, 6, 64, TRUE);
   Cbw[17] = 0x3f;
   Cbw[19] = 64;
-  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 42);
-  assert (GblMscBotRead (&Bot, 0, Data, 42) == EFI_SUCCESS);
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 62);
+  assert (GblMscBotRead (&Bot, 0, Data, 62) == EFI_SUCCESS);
   assert (Data[5] == 0 && Data[6] == 0 && Data[7] == 2);
   assert (Data[9] == 0 && Data[10] == 8 && Data[11] == 0);
   /* GET CONFIGURATION advertises the CD-ROM profile only: the data length
@@ -1765,6 +1765,30 @@ STATIC VOID IsoScsiTests (VOID) {
   Cbw[16] = 3;
   Cbw[18] = 0;
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.SenseKey == 5 && Bot.Asc == 0x24);
+  /* The MMC capabilities page exists for optical LUNs: a read-only data disc
+   * advertises no CD-R/RW writing, no CD-DA, no C2 and no DVD capability. */
+  MakeCbw (Cbw, 0x1a, 6, 64, TRUE);
+  Cbw[17] = 0x2a;
+  Cbw[19] = 64;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 32);
+  assert (GblMscBotRead (&Bot, 0, Data, 32) == EFI_SUCCESS);
+  /* 4-byte header, 8-byte block descriptor, then the 20-byte page. */
+  assert (Data[12] == 0x2a && Data[13] == 18);
+  assert (Data[14] == 0 && Data[15] == 0 && Data[16] == 0 && Data[31] == 0);
+  /* "All pages" lists it after the caching and control pages. */
+  Cbw[17] = 0x3f;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 62);
+  assert (GblMscBotRead (&Bot, 0, Data, 62) == EFI_SUCCESS);
+  assert (Data[12] == 0x08 && Data[32] == 0x0a && Data[42] == 0x2a && Data[43] == 18);
+  /* GET EVENT STATUS NOTIFICATION never queues a media event: the image
+   * cannot be ejected or replaced, so the answer stays NEA. */
+  MakeCbw (Cbw, 0x4a, 10, 8, TRUE);
+  Cbw[16] = 1;
+  Cbw[19] = 0x10;
+  Cbw[23] = 8;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 8);
+  assert (GblMscBotRead (&Bot, 0, Data, 8) == EFI_SUCCESS);
+  assert (Data[0] == 0 && Data[1] == 0 && Data[2] == 0x80 && Data[5] == 0x10 && Data[7] == 0);
   /* READ TOC: one data track at LBA 0, then the lead-out. The lead-out carries
    * the address one block past the last block, which is how a host sizes the
    * disc (cdrom_get_last_written), so it must not be zero. */
@@ -1801,6 +1825,14 @@ STATIC VOID IsoScsiTests (VOID) {
   MakeCbw (Cbw, 0x43, 10, 12, TRUE);
   Cbw[23] = 12;
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.SenseKey == 5 && Bot.Asc == 0x20);
+  MakeCbw (Cbw, 0x4a, 10, 8, TRUE);
+  Cbw[23] = 8;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.SenseKey == 5 && Bot.Asc == 0x20);
+  /* The capabilities page is optical-only: a direct-access LUN rejects it. */
+  MakeCbw (Cbw, 0x1a, 6, 32, TRUE);
+  Cbw[17] = 0x2a;
+  Cbw[19] = 32;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.SenseKey == 5 && Bot.Asc == 0x24);
   ResetMocks ();
 }
 

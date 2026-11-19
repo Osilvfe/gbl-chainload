@@ -458,12 +458,16 @@ verify_file_lun() { # <row> <expected-block-size> <expected-type> <label>
     # Build marker: bump it whenever the on-wire behaviour changes, so a run
     # can be tied to a specific EFISP. 0001 lacks the MODE SENSE/page refusals,
     # 0002/0003 were intermediate builds, 0004 added the short-packet data
-    # stage, 0005/0006 were diagnostic builds, and 0007 returns a real READ TOC
-    # lead-out so the host sizes a CD-ROM LUN correctly.
+    # stage, 0005/0006 were diagnostic builds, 0007 returns a real READ TOC
+    # lead-out so the host sizes a CD-ROM LUN correctly, and 0008 adds the MMC
+    # capabilities page and GET EVENT STATUS NOTIFICATION.
     case "$revision" in
       0001|0002|0003|0004|0005|0006)
         note "product revision ${revision:-none}: predates the READ TOC lead-out fix"
         note "(0007); a CD-ROM LUN will show a wrong capacity; stage a newer EFISP" ;;
+      0007)
+        note "product revision 0007: predates the MMC capabilities page (0x2a) and"
+        note "GET EVENT STATUS NOTIFICATION (0008); stage a newer EFISP" ;;
     esac
   else
     fail "$label INQUIRY failed: $(printf '%s' "$out" | tr '\n' ' ')"
@@ -486,8 +490,21 @@ verify_file_lun() { # <row> <expected-block-size> <expected-type> <label>
       || fail "$label MODE SENSE block descriptor under DBD=0 is ${d0lbd:-missing} (expected 8)"
     [ "$d0bll" = "$block" ] && pass "$label MODE SENSE block length $d0bll" \
       || fail "$label MODE SENSE block length ${d0bll:-missing} (expected $block)"
-    [ "$pages" = "08,0a" ] && pass "$label MODE SENSE pages $pages" \
-      || fail "$label MODE SENSE pages ${pages:-none} (expected 08,0a)"
+    # The capabilities page 0x2a belongs to optical LUNs only; a direct-access
+    # LUN that listed it would be claiming CD behaviour it cannot deliver.
+    local want_pages=08,0a
+    [ "$ptype" = "5" ] && want_pages=08,0a,2a
+    [ "$pages" = "$want_pages" ] && pass "$label MODE SENSE pages $pages" \
+      || fail "$label MODE SENSE pages ${pages:-none} (expected $want_pages)"
+    if [ "$ptype" = "5" ]; then
+      printf '%s' "$out" | grep -qx "mode6_capabilities.status=ok" \
+        && pass "$label MODE SENSE page 2a capabilities" \
+        || fail "$label MODE SENSE page 2a not implemented"
+    else
+      printf '%s' "$out" | grep -qx "mode6_capabilities.status=check_condition" \
+        && pass "$label MODE SENSE page 2a rejected on a direct-access LUN" \
+        || fail "$label MODE SENSE page 2a accepted on a direct-access LUN"
+    fi
     printf '%s' "$out" | grep -qx "mode10.status=ok" \
       && pass "$label MODE SENSE(10)" || fail "$label MODE SENSE(10) failed"
     printf '%s' "$out" | grep -qx "mode6_pc1.status=check_condition" \
@@ -513,6 +530,18 @@ verify_file_lun() { # <row> <expected-block-size> <expected-type> <label>
       && pass "$label READ TOC" || fail "$label READ TOC failed"
     printf '%s' "$out" | grep -qx "toc.track=1:4:0" \
       && pass "$label one data track at LBA 0" || fail "$label unexpected track list"
+    # The image can never be ejected or replaced, so every poll must answer NEA
+    # with no event descriptor; a media event would make the host drop its
+    # cached capacity.
+    printf '%s' "$out" | grep -qx "event.status=ok" \
+      && pass "$label GET EVENT STATUS NOTIFICATION" \
+      || fail "$label GET EVENT STATUS NOTIFICATION failed"
+    printf '%s' "$out" | grep -qx "event.nea=1" \
+      && pass "$label no media event pending (NEA)" || fail "$label NEA not set"
+    printf '%s' "$out" | grep -qx "event.supported_classes=0x10" \
+      && pass "$label media event class advertised" || fail "$label media event class missing"
+    printf '%s' "$out" | grep -qx "event.descriptor_length=0" \
+      && pass "$label empty event descriptor" || fail "$label unexpected event descriptor"
   fi
 
   out=$(probe openrw "$DEV_PREFIX$dev" || true)

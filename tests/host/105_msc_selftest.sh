@@ -143,12 +143,21 @@ case "$cmd" in
     echo "capacity.block_size=$block"
     echo "handle=stub" ;;
   modesense)
+    if [ "$model" = "ISO IMAGE" ] && [ "${MSC_STUB_NO_CAPS:-0}" != 1 ]; then
+      echo "mode6.pages=08,0a,2a"
+      echo "mode6_capabilities.status=ok"
+      echo "mode6_capabilities.pages=2a"
+      echo "mode6_capabilities.page_length=18"
+    else
+      echo "mode6.pages=08,0a"
+      echo "mode6_capabilities.status=check_condition"
+      echo "mode6_capabilities.sense=5/0x24"
+    fi
     echo "mode6.status=ok"
     echo "mode6.wp=${MSC_STUB_WP:-1}"
     echo "mode6.block_descriptor_length=0"
     echo "mode6.block_count=0"
     echo "mode6.logical_block_length=0"
-    echo "mode6.pages=08,0a"
     echo "mode6.hex=0080001f"
     echo "mode6_dbd0.status=ok"
     echo "mode6_dbd0.block_descriptor_length=8"
@@ -169,6 +178,13 @@ case "$cmd" in
     echo "toc.first_track=1"
     echo "toc.last_track=1"
     echo "toc.track=1:4:0"
+    if [ "${MSC_STUB_NO_EVENT:-0}" != 1 ]; then
+      echo "event.status=ok"
+      echo "event.descriptor_length=0"
+      echo "event.nea=1"
+      echo "event.notification_class=0"
+      echo "event.supported_classes=0x10"
+    fi
     echo "handle=stub" ;;
   openrw)
     echo "openrw=refused_erofs" ;;
@@ -263,6 +279,12 @@ grep -q "PASS  iso/ISO IMAGE one data track at LBA 0" "$work/run.log"
 # A CD-ROM LUN is bound by sr_mod, so the harness must look at /dev/sr*, not
 # only /dev/sd*.
 grep -q -- '-- iso/ISO IMAGE: /dev/sr0 (ISO IMAGE)' "$work/run.log"
+grep -q "PASS  iso/ISO IMAGE MODE SENSE pages 08,0a,2a" "$work/run.log"
+grep -q "PASS  iso/ISO IMAGE MODE SENSE page 2a capabilities" "$work/run.log"
+grep -q "PASS  file/FILE IMAGE MODE SENSE page 2a rejected on a direct-access LUN" "$work/run.log"
+grep -q "PASS  iso/ISO IMAGE GET EVENT STATUS NOTIFICATION" "$work/run.log"
+grep -q "PASS  iso/ISO IMAGE no media event pending (NEA)" "$work/run.log"
+grep -q "PASS  iso/ISO IMAGE media event class advertised" "$work/run.log"
 grep -q "PASS  mixed/FILE IMAGE write rejected, content unchanged" "$work/run.log"
 grep -q "PASS  mixed returned to GBL Fastboot" "$work/run.log"
 [ "$(sed -n '1p' "$work/log")" = "file:/EFI/BOOT/BOOTAA64.EFI" ]
@@ -276,6 +298,16 @@ grep -q "FAIL  file/FILE IMAGE content hash" "$work/tamper.log"
 echo "== run (wrong WP bit must fail) =="
 MSC_STUB_WP=0 run_selftest bash "$script" run --cases file >"$work/wp.log" && exit 1 || true
 grep -q "FAIL  file/FILE IMAGE MODE SENSE WP bit is 0" "$work/wp.log"
+
+echo "== run (an optical LUN without page 0x2a must fail) =="
+MSC_STUB_NO_CAPS=1 run_selftest bash "$script" run --cases iso >"$work/nocaps.log" 2>&1 && exit 1 || true
+grep -q "FAIL  iso/ISO IMAGE MODE SENSE pages 08,0a (expected 08,0a,2a)" "$work/nocaps.log"
+grep -q "FAIL  iso/ISO IMAGE MODE SENSE page 2a not implemented" "$work/nocaps.log"
+
+echo "== run (a missing media event class must fail) =="
+MSC_STUB_NO_EVENT=1 run_selftest bash "$script" run --cases iso >"$work/noevent.log" 2>&1 && exit 1 || true
+grep -q "FAIL  iso/ISO IMAGE GET EVENT STATUS NOTIFICATION failed" "$work/noevent.log"
+grep -q "FAIL  iso/ISO IMAGE media event class missing" "$work/noevent.log"
 
 echo "== an export without a block device fails with diagnostics =="
 MSC_STUB_NO_LUN=1 MSC_LUN_TIMEOUT=2 run_selftest bash "$script" run --cases file >"$work/nolun.log" 2>&1 && exit 1 || true

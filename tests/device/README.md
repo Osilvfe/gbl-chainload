@@ -72,7 +72,7 @@ probe retries, since the interface can need a moment after an eject.
 | Case | Command | Verified |
 | --- | --- | --- |
 | `file` | `oem usb-msc file:<path>` | 512-byte blocks, RO, padded capacity, content hash, INQUIRY type 0, MODE SENSE header/block descriptor/pages, write rejected |
-| `iso` | `oem usb-msc iso:<path>` | 2048-byte blocks, INQUIRY type 5 (CD-ROM), GET CONFIGURATION CD-ROM profile, READ TOC (one data track at LBA 0 plus the lead-out that carries the disc size), content hash, MODE SENSE, write rejected |
+| `iso` | `oem usb-msc iso:<path>` | 2048-byte blocks, INQUIRY type 5 (CD-ROM), GET CONFIGURATION CD-ROM profile, READ TOC (one data track at LBA 0 plus the lead-out that carries the disc size), MODE SENSE page `0x2a` capabilities, GET EVENT STATUS NOTIFICATION (NEA, media class advertised), content hash, write rejected |
 | `mixed` | `oem usb-msc boot_a,file:<path>` | two LUNs with independent block sizes and models |
 
 Each case ejects through `START STOP UNIT (LoEj=1)` and waits for

@@ -94,6 +94,10 @@ def cdb_read_toc(msf=0, fmt=0, alloc=0x100):
                   (alloc >> 8) & 0xFF, alloc & 0xFF, 0])
 
 
+def cdb_get_event_status_notification(rt=1, alloc=0x10):
+    return bytes([0x4A, rt & 1, 0, 0, 0, 0, 0, (alloc >> 8) & 0xFF, alloc & 0xFF, 0])
+
+
 def cdb_prevent_allow(prevent=0):
     return bytes([0x1E, 0, 0, 0, 1 if prevent else 0, 0])
 
@@ -172,6 +176,8 @@ def parse_mode_sense(data, ten):
         if page == 0x0A:
             result["control_gltsd"] = (body[0] >> 2) & 1 if len(body) > 0 else -1
             result["control_dsense"] = (body[0] >> 3) & 1 if len(body) > 0 else -1
+        if page == 0x2A:
+            result["capabilities_page_length"] = size
         offset += 2 + size
     result["pages"] = ",".join(codes)
     return result
@@ -444,6 +450,21 @@ def cmd_modesense(dev):
                 if not expect_ok:
                     failures += 1
             transport_facts(tag, raw)
+        # MMC page 0x2A (CD/DVD capabilities) only exists for optical LUNs.
+        # Ask with DBD=1 so the reply is the header plus the page alone; a
+        # direct-access LUN must refuse it like any other unknown page.
+        info, sb, raw = _mode_sense(fd, False, 0x2A, 0, 1)
+        key, asc, _ = sense_summary(sb) or (-1, -1, -1)
+        if info is None:
+            print("mode6_capabilities.status=check_condition")
+            print("mode6_capabilities.sense=%d/0x%02x" % (key, asc & 0xFF))
+        elif isinstance(info, str):
+            print("mode6_capabilities.status=%s" % info)
+        else:
+            print("mode6_capabilities.status=ok")
+            print("mode6_capabilities.pages=%s" % info["pages"])
+            print("mode6_capabilities.page_length=%s"
+                  % info.get("capabilities_page_length", "missing"))
         # The same failed-data-in machinery serves a READ past the end of the
         # medium; hosts must see CHECK CONDITION there too, not zeros.
         status, sb, raw, _ = sg_io(fd, bytes([0x28, 0, 0x7F, 0xFF, 0xFF, 0xFF, 0, 0, 1, 0]),
@@ -501,6 +522,22 @@ def cmd_mmc(dev):
             key, asc, _ = sense_summary(sb) or (-1, -1, -1)
             print("toc.status=check_condition")
             print("toc.sense=%d/0x%02x" % (key, asc & 0xFF))
+            failures += 1
+        # GET EVENT STATUS NOTIFICATION: the data length counts the event
+        # descriptor only, NEA says no event is pending, and the supported
+        # class mask advertises the media class (bit 4).
+        status, sb, data, _ = sg_io(fd, cdb_get_event_status_notification(1, 0x10),
+                                    0x10, SG_DXFER_FROM_DEV)
+        if status == 0 and len(data) >= 6:
+            print("event.status=ok")
+            print("event.descriptor_length=%d" % int.from_bytes(data[0:2], "big"))
+            print("event.nea=%d" % ((data[2] >> 7) & 1))
+            print("event.notification_class=%d" % (data[2] & 7))
+            print("event.supported_classes=0x%02x" % data[5])
+        else:
+            key, asc, _ = sense_summary(sb) or (-1, -1, -1)
+            print("event.status=check_condition")
+            print("event.sense=%d/0x%02x" % (key, asc & 0xFF))
             failures += 1
         print("handle=%s" % how)
     finally:
@@ -580,13 +617,14 @@ def self_test_sgio_header():
     assert payload == b"ABC", payload
 
 
-def _fake_mode_body(dbd, ten=False):
-    """MODE SENSE reply shaped like the firmware's: pages 0x08 and 0x0a."""
+def _fake_mode_body(dbd, ten=False, capabilities=False):
+    """MODE SENSE reply shaped like the firmware's: pages 0x08, 0x0a and 0x2a."""
     header = 8 if ten else 4
     descriptor = 0 if dbd else 8
     caching = bytes([0x08, 18, 0x00] + [0] * 17)
     control = bytes([0x0A, 8, 0x04] + [0] * 7)
-    total = header + descriptor + len(caching) + len(control)
+    caps = bytes([0x2A, 18] + [0] * 18) if capabilities else b""
+    total = header + descriptor + len(caching) + len(control) + len(caps)
     body = bytearray(total)
     body[2 if ten else 0] = 0x80
     body[3 if ten else 2] = 0x80
@@ -605,6 +643,8 @@ def _fake_mode_body(dbd, ten=False):
     body[offset:offset + len(caching)] = caching
     offset += len(caching)
     body[offset:offset + len(control)] = control
+    offset += len(control)
+    body[offset:offset + len(caps)] = caps
     return bytes(body)
 
 
@@ -648,7 +688,7 @@ def self_test_modesense_flow():
                 elif page == 0x00:
                     payload = bytes([3, 0, 0x80, 0])
                 else:
-                    payload = _fake_mode_body(dbd, ten)
+                    payload = _fake_mode_body(dbd, ten, capabilities=True)
             elif op == 0x28:
                 status, sb = 2, sense(5, 0x21)
             elif op == 0xFF:
@@ -669,6 +709,8 @@ def self_test_modesense_flow():
         assert healthy == 0, text
         for want in ("mode6_pc1.status=check_condition",
                      "mode6_bad_page.status=check_condition",
+                     "mode6_capabilities.status=ok",
+                     "mode6_capabilities.page_length=18",
                      "badread.status=check_condition",
                      "badop.status=check_condition"):
             assert want in text, (want, text)
