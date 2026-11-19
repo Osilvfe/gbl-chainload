@@ -1,16 +1,28 @@
 # Experimental USB Mass Storage
 
-GBL can temporarily replace its Fastboot USB interface with a read-only USB
-Mass Storage device exposing up to four LUNs. With no arguments it exposes a
-freshly generated 1 MiB FAT12 RAM disk containing `README.TXT`. Normal builds reject
-media arguments before storage access or USB handoff. The experimental
-backends - named partitions plus read-only ISO/file images - stay behind
-`GBL_USB_MSC_PARTITION_EXPORT=1`; host coverage includes a fairlady `boot_a`
-device test with repeated RAM/partition sessions and Fastboot resume. Other devices and partition
-geometries remain unverified. It never exports a whole UFS LUN,
-writes to storage, decrypts Android
-data, or exports a previous Fastboot download. The existing RAM boot commands
-remain unchanged; a writable RAM payload-transfer disk is not part of MSC.
+GBL can temporarily replace its Fastboot USB interface with a USB Mass
+Storage device exposing up to four LUNs. With no arguments it exposes a
+freshly generated 1 MiB FAT12 RAM disk containing `README.TXT`. Normal builds
+reject media arguments before storage access or USB handoff, and behave as a
+**read-only** disk: every write is refused with DATA PROTECT. The
+experimental backends - named partitions plus read-only ISO/file images -
+stay behind `GBL_USB_MSC_PARTITION_EXPORT=1`; host coverage includes a
+fairlady `boot_a` device test with repeated RAM/partition sessions and
+Fastboot resume. Other devices and partition geometries remain unverified.
+
+Write support is a further opt-in and off in every normal build. A
+`GBL_USB_MSC_WRITE` build turns on the write path (WRITE(6/10/12/16),
+SYNCHRONIZE CACHE and MODE SELECT); by default it accepts writes to the
+in-memory RAM LUN only, where the "disk" is volatile RAM and discarded when
+the session ends. Writing to a **real** partition needs still another flag,
+`GBL_USB_MSC_WRITE_PARTITIONS`, plus an explicit `rw:<name>` LUN spec, and
+still refuses any partition that starts before LBA 34 so the GPT itself can
+never be overwritten. Without those flags no block write path exists in the
+image at all. See [Write backend](#write-backend) below.
+
+It never exports a whole UFS LUN, decrypts Android data, exports a previous
+Fastboot download, or (in a plain build) writes to storage. The existing RAM
+boot commands remain unchanged and unrelated to the MSC RAM LUN.
 
 ## Trying the implementation
 
@@ -71,8 +83,10 @@ and failed preflight reads fail before switching away from Fastboot.
 No partition label means the RAM test disk, never an implicit internal disk.
 Each LUN keeps the partition's 512- or 4096-byte logical block size. The
 implementation supports `REPORT LUNS`, 64-bit `READ CAPACITY(16)`, and
-`VERIFY(10)` in addition to the read data path; all write commands are still
-rejected with DATA PROTECT.
+`VERIFY(10)` in addition to the read data path. A plain build rejects every
+write with DATA PROTECT; a writable build only accepts one for a LUN opened
+with the explicit `rw:` prefix (see [Write backend](#write-backend)), and a
+bare name is still read-only.
 
 ### Read-only ISO and file LUNs
 
@@ -108,16 +122,47 @@ fastboot oem usb-msc boot_a,iso:fs1:/EFI/ISO/test.iso
 - Directories, empty files and unreadable files are rejected during
   preflight, before Fastboot hands the controller to MSC.
 
+### RAM disk and writable partitions
+
+The comma-separated LUN list understands three more forms:
+
+- `ram:` (or no argument) - the in-memory LUN: a 1 MiB FAT12 image carrying
+  `README.TXT`. `ram:<KiB>` sizes it explicitly (64 KiB to 64 MiB, a multiple
+  of 512 bytes); a size other than 1 MiB starts blank. It is private to the
+  session and discarded on eject, teardown or power loss, so nothing it holds
+  can reach real storage. In a `GBL_USB_MSC_WRITE` build it is writable.
+- `ro:<name>` - a named partition, explicitly read-only (identical to a bare
+  `<name>`). Its serial begins `GBLRO-`.
+- `rw:<name>` - a named partition opened for writing. Only a
+  `GBL_USB_MSC_WRITE_PARTITIONS` build accepts it; any other build refuses the
+  whole spec with `EFI_SECURITY_VIOLATION` rather than silently downgrading a
+  name that says `rw` to read-only. Its serial begins `GBLRW-`, so a writable
+  LUN is distinguishable before the first write. A partition whose
+  `StartingLBA` is below 34 is refused with write access (see below).
+
+A bare name remains read-only in a writable build; there is no implicit
+writable export.
+
 ### MODE SENSE
 
 `MODE SENSE(6)` and `MODE SENSE(10)` return the mode header with the
 write-protected bit, an 8-byte block descriptor with the LUN's density,
 block count and logical block size, and the implemented pages:
 
-- page `0x08` (caching): write cache disabled (`WCE=0`) and no read cache,
-  so hosts select write-through instead of logging a missing caching page;
+- page `0x01` (read/write error recovery): a 12-byte page with every
+  recovery parameter off. The LUNs perform no automatic retry, correction or
+  deferred error handling, so the page exists only so error-recovery-aware
+  tools do not treat the LUN as SCSI-1;
+- page `0x08` (caching): write cache disabled (`WCE=0`) and no read cache.
+  `WCE` stays `0` on writable media too: an acknowledged write must already
+  have reached the medium, so the host keeps write-through instead of
+  logging a missing caching page and does not buffer writes that a power cut
+  could lose;
 - page `0x0a` (control): fixed-format sense data and no saved log
   parameters;
+- page `0x1c` (informational exceptions control): a 10-byte page, every
+  field zero, `TEST` off and no log. The medium cannot develop a predictive
+  failure this device could report, so nothing is claimed;
 - page `0x2a` (CD/DVD capabilities and mechanical status), optical LUNs
   only: a 20-byte page whose capability bits are all clear. A read-only
   data image cannot record CD-R/RW, play CD-DA, return C2 pointers, read
@@ -125,9 +170,10 @@ block count and logical block size, and the implemented pages:
   false. The speed and mechanical-status fields read zero ("not available")
   rather than a guessed value. Answering ILLEGAL REQUEST here makes optical
   tools downgrade the LUN to a bare SCSI-1 drive;
-- page code `0x3f` returns every page that applies to the LUN (the
-  capabilities page is appended after the control page for CD-ROM), page
-  code `0x00` returns only the header and block descriptor.
+- pages are emitted in ascending page-code order: `01,08,0a,1c` on every
+  LUN, followed by `2a` on a CD-ROM LUN. Page code `0x3f` returns every page
+  that applies to the LUN, and page code `0x00` returns only the header and
+  block descriptor.
 
 The DBD bit suppresses the block descriptor. Page control `0` (current) and
 `2` (default) return the same bytes, `1` (changeable) and `3` (saved) are
@@ -168,11 +214,15 @@ prompts or run repair tools; host filesystem support is independent of USB
 enumeration. Inspect or back up the identified host device read-only, using
 its reported size and identity rather than assuming a fixed `/dev/sdX` name.
 Fastboot disappears while MSC owns the controller: this is intentional,
-not a composite Fastboot + storage device. Host writes are rejected with
-SCSI DATA PROTECT / WRITE PROTECTED; discarded OUT data never touches either
-the RAM disk or the exported partition. MSC does not call BlockIO write,
-flush or reset methods. This does not suppress existing boot-chain writes
-outside MSC and is not a promise that the exported bytes form a snapshot.
+not a composite Fastboot + storage device. In a plain build host writes are
+rejected with SCSI DATA PROTECT / WRITE PROTECTED, and neither the RAM disk
+nor the exported partition has a write path. A writable build (see
+[Write backend](#write-backend)) accepts writes only for the RAM LUN and,
+with the extra opt-in, an `rw:` partition; a bare named partition and every
+`file:`/`iso:` LUN stay read-only, and discarded OUT data for a refused write
+never touches either medium. This does not suppress existing boot-chain
+writes outside MSC and is not a promise that the exported bytes form a
+snapshot.
 
 Eject the disk using a host operation that sends SCSI START STOP UNIT,
 press either volume key (or Escape), or disconnect the cable. GBL then
@@ -180,6 +230,72 @@ attempts to restore the same Fastboot session without a device reboot.
 After reconnecting, verify it with `fastboot getvar gbl-chainload_build`.
 Different host eject implementations need not send START STOP UNIT;
 the keys remain the explicit local exit path.
+
+## Write backend
+
+Writing is a build-time opt-in, layered so a normal image has no write path
+at all:
+
+| Build | Flag | Writable LUN |
+| --- | --- | --- |
+| normal | (none) | none - every write refused `7/0x27` |
+| RAM write | `GBL_USB_MSC_WRITE=1` | `ram:` only |
+| partition write | `GBL_USB_MSC_WRITE_PARTITIONS=1` | `ram:` and `rw:<name>` |
+
+The native and unified build entries expose these as
+`--experimental-usb-msc-write` and `--experimental-usb-msc-write-partitions`
+(both imply `--experimental-usb-msc-partition-export`). In a plain build the
+`PartitionWrite`/`PartitionFlush` code and the block-export write helpers are
+compiled out entirely, so there is no code path that can reach storage even
+by mistake. Build identity carries `-msc-write[-partitions]` so
+`fastboot getvar gbl-chainload_build` shows which policy is staged.
+
+Commands:
+
+- `WRITE(6/10/12/16)` is range-checked first (`5/0x21` if the block span
+  falls outside the medium), then refused with DATA PROTECT `7/0x27` if the
+  LUN is not writable. A refusal still keeps the declared OUT length so the
+  bulk data stage drains cleanly and the next command starts in sync.
+- `SYNCHRONIZE CACHE(10)` (`0x35`) calls the medium's flush. The RAM backend
+  has no cache to commit; a partition backend forwards to
+  `EFI_BLOCK_IO_PROTOCOL.FlushBlocks`.
+- `MODE SELECT(6/10)` (`0x15`/`0x55`) accepts a parameter list that only
+  re-states current values: the list is buffered whole and validated when
+  the data stage completes. An unknown page or `WCE=1` is rejected with
+  `5/0x26` (invalid field in parameter list); an unparsable or too-short list
+  with `5/0x1a`; a list larger than 96 bytes is refused before the data stage.
+
+Ordering and durability guarantees, which is what a host expects from a disk:
+
+- **Every acknowledged write is visible to the next read.** RAM writes land
+  in the same buffer reads come from, in command order. There is no
+  write-back cache: the caching page keeps `WCE=0`, so the host does not
+  buffer writes it thinks the device will commit later, and a write that has
+  returned is already on the medium.
+- **Partial blocks never tear.** A write that does not start and end on a
+  partition-block boundary is done read-modify-write: the affected physical
+  block is read, the changed bytes are overlaid, and the whole block is
+  written back once. A power cut can lose the update, but it cannot leave
+  half of one block new and half old.
+- **Flush points.** A dirty writable LUN is flushed at SYNCHRONIZE CACHE, on
+  eject (START STOP UNIT with LoEj), and when the session tears down, so an
+  orderly exit commits everything. An abrupt power loss may lose the last
+  un-synced writes, which is exactly the guarantee the caching page
+  advertises.
+- **The GPT is out of reach.** A writable partition must report
+  `StartingLBA >= 34`; the protective MBR, the GPT header and the entry
+  array live in LBAs 0..33, so the export refuses to hand any of them out
+  writable even if such a partition existed.
+- **Concurrency.** The BOT layer is strictly one command at a time: a write
+  completes (data stage drained, CSW sent) before the next CDB is parsed, so
+  there is no interleaving to reason about. The medium is private to the
+  session; no other firmware component reads it while MSC owns the
+  controller.
+
+The RAM LUN is the place to exercise this without touching real storage:
+`ram:` in a writable build accepts writes, shows them on the next read,
+honours SYNCHRONIZE CACHE, and is thrown away on eject. The device self-test
+uses exactly that - see below.
 
 ## Device-validation sequence
 
@@ -219,13 +335,13 @@ policies still apply. Do not flash EFISP just to try this feature.
 
 ## Implementation boundaries
 
-- `UsbMscScsi.c` generates the FAT image and implements bounded, read-only
-  SCSI processing plus CBW/CSW validation and BOT direction/residue rules.
+- `UsbMscScsi.c` generates the FAT image and implements bounded SCSI
+  processing plus CBW/CSW validation and BOT direction/residue rules.
   Capacity and byte offsets are 64-bit; READ CAPACITY(16) and READ(16) cover
   partitions beyond READ CAPACITY(10)'s address range. Each LUN reports its
   backend's 512- or 4096-byte logical sector size; READ(6/10/12/16),
-  WRITE(6/10/12/16) rejection, REPORT LUNS and VERIFY(10) are bounded by that
-  size. Multiple LUNs need both BOT class paths to agree: GET MAX LUN returns
+  WRITE(6/10/12/16) (range-checked, then accepted only on a writable LUN),
+  REPORT LUNS, VERIFY(10) and MODE SELECT are bounded by that size. Multiple LUNs need both BOT class paths to agree: GET MAX LUN returns
   the highest LUN index, and each REPORT LUNS entry uses SCSI peripheral device
   addressing (bus in byte 0, LUN in byte 1). A list that puts the LUN in the
   leading byte is decoded by hosts as a different LUN number, so the export
@@ -233,7 +349,7 @@ policies still apply. Do not flash EFISP just to try this feature.
   VPD page 0x80/0x83, REPORT LUNS and multi-LUN probing on that level, so an
   SPC-2 answer makes Linux fall back to a sequential LUN scan and never ask for
   the per-LUN serial number page.
-- `UsbMscMedia.c` provides the RAM and partition read backends. A named export
+- `UsbMscMedia.c` provides the RAM and partition backends. A named export
   requires a unique GPT record and a non-removable logical-partition BlockIO
   handle with matching partition-relative geometry. No whole-disk or active
   slot lookup is used. Reads use a fixed 64 KiB aligned bounce buffer to
@@ -242,11 +358,15 @@ policies still apply. Do not flash EFISP just to try this feature.
   and alignment changes fail reads instead of silently switching media.
   Read errors return SCSI sense/failed status, preserving the Fastboot return
   path rather than treating a storage error as a fatal USB session error.
+  The RAM backend owns a variable-size buffer (`ram:[KiB]`); the partition
+  backend's write/read-modify-write/flush helpers are compiled only under
+  `GBL_USB_MSC_WRITE_PARTITIONS`, so a plain image has no block write path.
 - `UsbMscUsb.c` owns the lower-level Qualcomm `EFI_USBFN_IO_PROTOCOL`
   session, descriptors, endpoint-zero requests, bulk transfers and reset
-  recovery. It requires protocol revision `0x00010003` or later. USB
-  full/high/super-speed descriptors are provided; actual controller and
-  host compatibility still require hardware testing.
+  recovery. It requires protocol revision `0x00010003` or later. It routes
+  WRITE and MODE SELECT OUT data stages into the BOT layer and flushes dirty
+  LUNs at teardown. USB full/high/super-speed descriptors are provided;
+  actual controller and host compatibility still require hardware testing.
 - `UsbMscFastboot.c` registers
   `oem usb-msc [exact-partition-name[,exact-partition-name...]]`, rejects
   extra arguments and an in-flight flash, checks the protocol and partition,
@@ -306,14 +426,20 @@ it to `EFI/GBLMSC/selftest.bin`, for devices where no usable file exists yet.
 
 The GBL Fastboot phase (`run`) exports that file as `file:` and `iso:`,
 verifies logical block size, read-only flag, padded capacity, content hash,
-INQUIRY type, `MODE SENSE` header/block descriptor/pages (including that
-page `0x2a` exists on the CD-ROM LUN and is refused on a direct-access one)
-and the MMC commands with their event-status answer, tries a write on each
-LUN, and ejects back to Fastboot. A `mixed`
-case exports `boot_a` together with the file LUN, and the reference hash comes
-from the device's own `sha256sum` of the recorded file. See
-[tests/device/README.md](../../tests/device/README.md) for the options; the
-offline replay of the script itself is `tests/host/105_msc_selftest.sh`.
+INQUIRY type, `MODE SENSE` header/block descriptor/pages (the
+`01,08,0a,1c[,2a]` set, including that page `0x2a` exists on the CD-ROM LUN
+and is refused on a direct-access one) and the MMC commands with their
+event-status answer, tries a write on each LUN, and ejects back to Fastboot.
+A `mixed` case exports `boot_a` together with the file LUN, and the reference
+hash comes from the device's own `sha256sum` of the recorded file. A `ram`
+case exports the in-memory LUN and probes `WRITE`: a read-only build must
+refuse it with DATA PROTECT (and leave the content unchanged); a writable
+build must accept it, show the bytes on the next read, flush with SYNCHRONIZE
+CACHE, and leave the medium as it found it. This is the only case that
+exercises the write backend on the device, and it never touches real
+storage. See [tests/device/README.md](../../tests/device/README.md) for the
+options; the offline replay of the script itself is
+`tests/host/105_msc_selftest.sh`.
 
 ## Host validation
 
@@ -341,8 +467,18 @@ the default command guard and opt-in command path are compiled and tested.
 Additional cases cover four-LUN REPORT LUNS, LUN selection, invalid LUN
 sense, 4 KiB logical blocks, READ CAPACITY 16, VERIFY(10), and deterministic
 write rejection. Mode-sense coverage checks both CDB sizes, the block
-descriptor, the DBD bit, page `0x08`/`0x0a`/`0x3f`/`0x00`, the rejected page
-controls and page codes, and allocation-length truncation. File media
+descriptor, the DBD bit, the page set `01`/`08`/`0a`/`1c`/`2a`/`0x3f`/`0x00`,
+the rejected page controls and page codes, and allocation-length truncation.
+The harness builds four firmware variants - `0:0:0`, `1:0:0`, `1:1:0` and
+`1:1:1` for partition-export/write/write-partitions - and a text check
+confirms the block write/flush helpers exist only inside
+`GBL_USB_MSC_WRITE_PARTITIONS` regions and that the RAM region has no BlockIO.
+The write backend gets direct coverage too: RAM sizing and bounds, a refused
+write leaving the content unchanged, write-then-read ordering, SYNCHRONIZE
+CACHE clearing dirty state, range refusal, MODE SELECT accept/`WCE`/unknown/
+overlong lists, `rw:` partition write with read-modify-write, a flush on
+close, the `LBA < 34` refusal, the `ro:`/`rw:` spellings, and `rw:` being
+refused in a non-write build. File media
 coverage drives a mocked `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL` and
 `EFI_FILE_PROTOCOL`: ISO/file block sizes, CD-ROM INQUIRY, zero padding of a
 short final block, `fsN:` selection, path normalisation, directory/empty

@@ -67,13 +67,17 @@ writes `getvar` results to **stderr**, so probes merge both streams; a GBL
 build id is cached for the whole run instead of re-probed per step; and every
 probe retries, since the interface can need a moment after an eject.
 
-`run` cases (`--cases "file iso mixed"` by default):
+`run` cases (`--cases "file iso mixed ram"` by default):
 
 | Case | Command | Verified |
 | --- | --- | --- |
 | `file` | `oem usb-msc file:<path>` | 512-byte blocks, RO, padded capacity, content hash, INQUIRY type 0, MODE SENSE header/block descriptor/pages, write rejected |
 | `iso` | `oem usb-msc iso:<path>` | 2048-byte blocks, INQUIRY type 5 (CD-ROM), GET CONFIGURATION CD-ROM profile, READ TOC (one data track at LBA 0 plus the lead-out that carries the disc size), MODE SENSE page `0x2a` capabilities, GET EVENT STATUS NOTIFICATION (NEA, media class advertised), content hash, write rejected |
 | `mixed` | `oem usb-msc boot_a,file:<path>` | two LUNs with independent block sizes and models |
+| `ram` | `oem usb-msc ram:` | 512-byte blocks, 1 MiB (2048 sectors), INQUIRY type 0, MODE SENSE pages `01,08,0a,1c` (page `0x2a` refused), and a WRITE probe: a plain build refuses with DATA PROTECT and the content is unchanged; a writable build accepts, shows the bytes on the next read, flushes with SYNCHRONIZE CACHE, and restores the block |
+
+Every case checks the full page set `01,08,0a,1c` on its LUNs, with `2a`
+added for the optical one.
 
 Each case ejects through `START STOP UNIT (LoEj=1)` and waits for
 `getvar gbl-chainload_build` to answer again. `--keep` stops after the export
@@ -94,9 +98,15 @@ Standalone SG_IO helper used by the self-test and handy on its own:
 sudo python3 tests/device/msc_probe.py info      /dev/sdb
 sudo python3 tests/device/msc_probe.py modesense /dev/sdb
 sudo python3 tests/device/msc_probe.py mmc       /dev/sdb
+sudo python3 tests/device/msc_probe.py write     /dev/sdb
 sudo python3 tests/device/msc_probe.py eject     /dev/sdb
 python3 tests/device/msc_probe.py self-test
 ```
+
+`write` targets the last logical block, writes a pattern, reads it back,
+issues SYNCHRONIZE CACHE, then restores the original bytes and flushes again,
+so it is safe on any writable LUN. On a read-only LUN it reports
+`write.status=refused` with the DATA PROTECT sense.
 
 It prints `key=value` lines, so `grep`/`awk` work without extra tooling.
 `info` also reports whether the host device the probe is talking to is
