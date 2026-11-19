@@ -13,6 +13,23 @@ BOOLEAN FlashComplete (VOID);
 
 STATIC BOOLEAN mMscRequested;
 
+STATIC CONST CHAR8 *const mMediaUsage =
+  "usage: oem usb-msc [name[,name...]] "
+  "(partition name, iso:path or file:path)";
+
+STATIC BOOLEAN
+IsFileSpec (IN CONST CHAR8 *Spec)
+{
+  UINTN Index;
+
+  for (Index = 0; Index < 5 && Spec[Index] != 0; Index++) {
+    if (Spec[Index] == ':') {
+      return Index != 0;
+    }
+  }
+  return FALSE;
+}
+
 STATIC VOID
 CmdUsbMsc (IN CONST CHAR8 *Argument, IN VOID *Data, IN UINT32 Size)
 {
@@ -28,7 +45,7 @@ CmdUsbMsc (IN CONST CHAR8 *Argument, IN VOID *Data, IN UINT32 Size)
   (VOID)Data;
   (VOID)Size;
   if (*Argument != '\0' && *Argument != ' ') {
-    FastbootFail ("usage: oem usb-msc [exact-partition-name[,exact-partition-name...]]");
+    FastbootFail (mMediaUsage);
     return;
   }
   while (*Argument == ' ') {
@@ -41,11 +58,11 @@ CmdUsbMsc (IN CONST CHAR8 *Argument, IN VOID *Data, IN UINT32 Size)
     Argument++;
   }
   if (*Argument != '\0') {
-    FastbootFail ("usage: oem usb-msc [exact-partition-name[,exact-partition-name...]]");
+    FastbootFail (mMediaUsage);
     return;
   }
   if (NameLength != 0 && !GBL_USB_MSC_PARTITION_EXPORT) {
-    FastbootFail ("partition export is disabled in this build; use oem usb-msc");
+    FastbootFail ("media export is disabled in this build; use oem usb-msc");
     return;
   }
   if (!FlashComplete ()) {
@@ -60,20 +77,22 @@ CmdUsbMsc (IN CONST CHAR8 *Argument, IN VOID *Data, IN UINT32 Size)
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_ERROR, "USB MSC: preflight failed: %r\n", Status));
     if (Status == EFI_INVALID_PARAMETER) {
-      FastbootFail ("usage: oem usb-msc [exact-partition-name[,exact-partition-name...]]");
+      FastbootFail (mMediaUsage);
     } else if (Status == EFI_ACCESS_DENIED) {
       FastbootFail ("partition export requires an unlocked device");
     } else if (Status == EFI_NO_MAPPING) {
       FastbootFail ("partition name is ambiguous");
     } else if (Status == EFI_NOT_FOUND && NameLength != 0) {
-      FastbootFail ("partition not found; use exact name, e.g. boot_a");
+      FastbootFail ("media not found; use an exact partition name, "
+                    "iso:<path> or file:<path>");
     } else {
-      FastbootFail ("USB/partition unavailable, unreadable or unsupported");
+      FastbootFail ("USB or media unavailable, unreadable or unsupported");
     }
     return;
   }
   FastbootOkay (NameLength == 0 ? "switching to read-only RAM disk"
-                               : "switching to read-only partition");
+             : (IsFileSpec (Partition) ? "switching to read-only file media"
+                                       : "switching to read-only partition"));
   for (Attempt = 0; Attempt < 5000; Attempt++) {
     PayloadSize = sizeof (Payload);
     Message = UsbDeviceEventNoEvent;

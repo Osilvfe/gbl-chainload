@@ -37,6 +37,7 @@ typedef enum {
   MscWaitCbw,
   MscReadData,
   MscReadZlp,
+  MscReadShort,
   MscDiscardData,
   MscSendCsw,
   MscWaitClear,
@@ -148,7 +149,7 @@ PrepareMediaSpec (IN CONST CHAR8 *Spec)
 {
   CONST CHAR8 *Start = Spec;
   CONST CHAR8 *End;
-  CHAR8 Name[GBL_MSC_NAME_SIZE];
+  CHAR8 Name[GBL_MSC_PATH_SIZE];
   UINTN Length;
   UINT8 Count = 0;
   EFI_STATUS Status;
@@ -159,7 +160,7 @@ PrepareMediaSpec (IN CONST CHAR8 *Spec)
       End++;
     }
     Length = (UINTN)(End - Start);
-    if (Length == 0 || Length >= GBL_MSC_NAME_SIZE || Count >= GBL_MSC_MAX_LUNS) {
+    if (Length == 0 || Length >= GBL_MSC_PATH_SIZE || Count >= GBL_MSC_MAX_LUNS) {
       return EFI_INVALID_PARAMETER;
     }
     CopyMem (Name, Start, Length);
@@ -401,6 +402,7 @@ StartCommand (IN OUT MSC_USB *Msc, IN UINTN Size)
   EFI_STATUS Status;
   GBL_MSC_BOT *Bot;
   UINT8 Lun;
+  UINTN Length;
 
   Msc->ReadOffset = 0;
   Lun = Size == GBL_MSC_CBW_SIZE
@@ -453,6 +455,27 @@ StartCommand (IN OUT MSC_USB *Msc, IN UINTN Size)
   }
   if (Bot->InLength != 0) {
     return QueueRead (Msc);
+  }
+  if (Bot->Status != 0 && Bot->HostLength != 0) {
+    /*
+     * A command that failed before its data stage still owes the host data,
+     * otherwise the CSW would be consumed as payload. Fill the data stage
+     * with a single non-full packet instead of a zero-length transfer: one
+     * packet always terminates the host's data-in stage, without depending on
+     * the controller turning a zero-length URB into a ZLP. The bytes carry no
+     * meaning; the CSW reports the failure.
+     */
+    Length = MIN ((UINTN)Bot->HostLength, (UINTN)Msc->BulkPacket - 1);
+    Length = MIN (Length, Msc->TransferLimit);
+    ZeroMem (Msc->Transfers[3].Buffer, Length);
+    Msc->BulkState = MscReadShort;
+    Status = QueueTransfer (Msc, 3, Length);
+    if (!EFI_ERROR (Status)) {
+      /* Count the bytes as processed so the CSW reports the residue of what
+       * the device really left untransferred. */
+      Msc->ReadOffset = (UINT32)Length;
+    }
+    return Status;
   }
   return QueueCsw (Msc);
 }
@@ -517,8 +540,12 @@ GetDescriptor (IN OUT MSC_USB *Msc)
       Text = "GBL";
     } else if (Index == 2) {
       Text = Msc->LunCount > 1 ? "GBL read-only multi-LUN"
-             : (Msc->Media[0].IsPartition
-                ? "GBL read-only partition" : "GBL read-only RAM disk");
+             : (Msc->Media[0].PeripheralType == GBL_MSC_PERIPHERAL_CDROM
+                ? "GBL read-only ISO image"
+                : (Msc->Media[0].IsFile
+                   ? "GBL read-only file image"
+                   : (Msc->Media[0].IsPartition
+                      ? "GBL read-only partition" : "GBL read-only RAM disk")));
     } else if (Index == 3) {
       Text = Msc->Media[0].Serial;
     } else {
@@ -766,7 +793,7 @@ TransferComplete (IN OUT MSC_USB *Msc, IN EFI_USBFN_TRANSFER_RESULT *Result)
     Msc->ReadOffset += (UINT32)Result->BytesTransferred;
     return QueueRead (Msc);
   }
-  if (Slot == 3 && Msc->BulkState == MscReadZlp) {
+  if (Slot == 3 && (Msc->BulkState == MscReadZlp || Msc->BulkState == MscReadShort)) {
     return QueueCsw (Msc);
   }
   if (Slot == 3 && Msc->BulkState == MscSendCsw) {

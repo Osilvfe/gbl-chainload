@@ -110,6 +110,8 @@ GblMscBotInitMedia (OUT GBL_MSC_BOT *Bot, IN CONST GBL_MSC_MEDIA *Media)
   Bot->Read = Media->Read;
   Bot->ReadContext = Media->Context;
   Bot->IsPartition = Media->IsPartition;
+  Bot->IsFile = Media->IsFile;
+  Bot->PeripheralType = Media->PeripheralType;
   Bot->Serial = Media->Serial;
   Bot->BlockSize = Media->BlockSize == 0 ? GBL_MSC_BLOCK_SIZE : Media->BlockSize;
   Bot->LunCount = 1;
@@ -124,6 +126,219 @@ FailCommand (IN OUT GBL_MSC_BOT *Bot, IN UINT8 Sense, IN UINT8 Asc)
   Bot->SenseKey = Sense;
   Bot->Asc = Asc;
   Bot->Ascq = 0;
+}
+
+#define GBL_MSC_MODE_HEADER_6 4U
+#define GBL_MSC_MODE_HEADER_10 8U
+#define GBL_MSC_MODE_BLOCK_DESCRIPTOR 8U
+#define GBL_MSC_MODE_PAGE_CACHING 0x08U
+#define GBL_MSC_MODE_PAGE_CONTROL 0x0aU
+#define GBL_MSC_MODE_PAGE_ALL 0x3fU
+
+/*
+ * SBC-3 caching page: no read cache, write cache disabled (WCE=0) so hosts
+ * report "write through", and no prefetch. Every value is fixed; the page is
+ * the same for current and default values.
+ */
+STATIC UINT32
+CachingPage (OUT UINT8 *Page)
+{
+  ZeroMem (Page, 20);
+  Page[0] = GBL_MSC_MODE_PAGE_CACHING;
+  Page[1] = 18;
+  return 20;
+}
+
+/*
+ * SPC-3 control page: fixed-format sense data (D_SENSE=0, which is what this
+ * device returns) and no saved log parameters (GLTSD=1).
+ */
+STATIC UINT32
+ControlPage (OUT UINT8 *Page)
+{
+  ZeroMem (Page, 10);
+  Page[0] = GBL_MSC_MODE_PAGE_CONTROL;
+  Page[1] = 8;
+  Page[2] = 0x04;
+  return 10;
+}
+
+/*
+ * MODE SENSE(6)/(10). Only current and default values exist, so page control
+ * 0 and 2 return the same bytes and 1 (changeable) / 3 (saved) are rejected.
+ * Page code 0 returns the header and block descriptor only, page code 0x3f
+ * returns every implemented page, and the block descriptor is suppressed by
+ * the DBD bit.
+ */
+STATIC UINT32
+ModeSense (
+  IN OUT GBL_MSC_BOT *Bot,
+  IN CONST UINT8 *Command,
+  IN BOOLEAN Ten
+  )
+{
+  UINT8 PageControl = (UINT8)(Command[2] >> 6);
+  UINT8 PageCode = (UINT8)(Command[2] & 0x3f);
+  BOOLEAN NoBlockDescriptor = (Command[1] & 0x08) != 0;
+  UINT32 Allocation = Ten ? (((UINT32)Command[7] << 8) | Command[8]) : Command[4];
+  UINT32 Header = Ten ? GBL_MSC_MODE_HEADER_10 : GBL_MSC_MODE_HEADER_6;
+  UINT32 BlockDescriptor = NoBlockDescriptor ? 0 : GBL_MSC_MODE_BLOCK_DESCRIPTOR;
+  UINT32 BlockSize = Bot->BlockSize == 0 ? GBL_MSC_BLOCK_SIZE : Bot->BlockSize;
+  UINT64 Blocks;
+  UINT32 Length;
+  UINT8 *Descriptor;
+  UINT8 *Page;
+
+  if ((PageControl != 0 && PageControl != 2) ||
+      (PageCode != 0 && PageCode != GBL_MSC_MODE_PAGE_CACHING &&
+       PageCode != GBL_MSC_MODE_PAGE_CONTROL && PageCode != GBL_MSC_MODE_PAGE_ALL)) {
+    FailCommand (Bot, 5, 0x24);
+    return 0;
+  }
+  Page = Bot->Response + Header + BlockDescriptor;
+  Length = 0;
+  if (PageCode == GBL_MSC_MODE_PAGE_CACHING || PageCode == GBL_MSC_MODE_PAGE_ALL) {
+    Length += CachingPage (Page + Length);
+  }
+  if (PageCode == GBL_MSC_MODE_PAGE_CONTROL || PageCode == GBL_MSC_MODE_PAGE_ALL) {
+    Length += ControlPage (Page + Length);
+  }
+  if (Ten) {
+    Bot->Response[0] = (UINT8)((Header + BlockDescriptor + Length - 2) >> 8);
+    Bot->Response[1] = (UINT8)(Header + BlockDescriptor + Length - 2);
+    Bot->Response[2] = 0;
+    Bot->Response[3] = 0x80;
+    Bot->Response[4] = 0;
+    Bot->Response[5] = 0;
+    Bot->Response[6] = (UINT8)(BlockDescriptor >> 8);
+    Bot->Response[7] = (UINT8)BlockDescriptor;
+  } else {
+    Bot->Response[0] = (UINT8)(Header + BlockDescriptor + Length - 1);
+    Bot->Response[1] = 0;
+    Bot->Response[2] = 0x80;
+    Bot->Response[3] = (UINT8)BlockDescriptor;
+  }
+  if (BlockDescriptor != 0) {
+    Descriptor = Bot->Response + Header;
+    Blocks = Bot->DiskSize / BlockSize;
+    Descriptor[0] = 0;
+    WriteBe24 (Descriptor + 1, (UINT32)MIN (Blocks, 0xffffffU));
+    Descriptor[4] = 0;
+    WriteBe24 (Descriptor + 5, BlockSize);
+  }
+  return MIN (Header + BlockDescriptor + Length, Allocation);
+}
+
+/*
+ * Minimal MMC GET CONFIGURATION: no feature descriptors, a single CD-ROM
+ * profile. Linux reads this before it treats the LUN as an optical drive.
+ */
+STATIC UINT32
+GetConfiguration (IN OUT GBL_MSC_BOT *Bot, IN CONST UINT8 *Command)
+{
+  UINT8 RequestType = (UINT8)(Command[1] & 0x03);
+  UINT16 Feature = ((UINT16)Command[2] << 8) | Command[3];
+  UINT32 Allocation = ((UINT32)Command[7] << 8) | Command[8];
+
+  if (Bot->PeripheralType != GBL_MSC_PERIPHERAL_CDROM) {
+    FailCommand (Bot, 5, 0x20);
+    return 0;
+  }
+  if (RequestType == 3) {
+    FailCommand (Bot, 5, 0x24);
+    return 0;
+  }
+  if (RequestType == 2 && Feature != 0) {
+    /* The requested feature is not implemented: an empty feature list. */
+    return MIN (4U, Allocation);
+  }
+  /*
+   * The data length counts the bytes that follow it, so 4 covers the two
+   * reserved bytes plus the current profile; there are no features.
+   */
+  Bot->Response[3] = 4;
+  Bot->Response[6] = 0;
+  Bot->Response[7] = 0x08;
+  return MIN (8U, Allocation);
+}
+
+/*
+ * TOC addresses are a plain LBA or MSF, which counts 75 frames per second from
+ * 00:02:00 because of the 150-frame pregap.
+ */
+STATIC VOID
+TocAddress (
+  OUT UINT8 *Field,
+  IN UINT32 Lba,
+  IN BOOLEAN Msf
+  )
+{
+  UINT32 Frames;
+
+  if (!Msf) {
+    WriteBe32 (Field, Lba);
+    return;
+  }
+  Frames = Lba + 150;
+  Field[0] = 0;
+  Field[1] = (UINT8)(Frames / (75 * 60));
+  Field[2] = (UINT8)((Frames / 75) % 60);
+  Field[3] = (UINT8)(Frames % 75);
+}
+
+/*
+ * MMC READ TOC/PMA/ATIP: the image is one data track in one session that
+ * starts at LBA 0. The lead-out entry (track 0xAA) carries the address just
+ * past the last block, and that is where Linux gets the medium size from:
+ * cdrom_get_last_written asks for track 0xAA in MSF form and the resulting
+ * value becomes the disc capacity. A wrong lead-out makes the host believe the
+ * disc is larger than the image and probe blocks past its end.
+ *
+ * Format 0 (TOC) and format 1 (multi-session info) share this layout, so an
+ * unimplemented format falls back to it instead of failing: hosts only need
+ * the track and lead-out entries of a single-session data disc.
+ */
+STATIC UINT32
+ReadToc (IN OUT GBL_MSC_BOT *Bot, IN CONST UINT8 *Command)
+{
+  UINT8 Format = (UINT8)(Command[2] & 0x0f);
+  BOOLEAN Msf = (Command[1] & 0x02) != 0;
+  UINT8 StartTrack = Command[6];
+  UINT32 Allocation = ((UINT32)Command[7] << 8) | Command[8];
+  UINT32 BlockSize = Bot->BlockSize == 0 ? GBL_MSC_BLOCK_SIZE : Bot->BlockSize;
+  UINT32 LeadOut = (UINT32)MIN (Bot->DiskSize / BlockSize, MAX_UINT32);
+  UINT32 Length = 0;
+  UINT8 *Entry;
+
+  if (Bot->PeripheralType != GBL_MSC_PERIPHERAL_CDROM) {
+    FailCommand (Bot, 5, 0x20);
+    return 0;
+  }
+  (VOID)Format;
+  /* First/last track (format 0) and first/last session (format 1). */
+  Bot->Response[2] = 1;
+  Bot->Response[3] = 1;
+  Entry = Bot->Response + 4;
+  if (StartTrack != 0xaa) {
+    /* The only track: data (CONTROL=4), positioned by LBA (ADR=1), at LBA 0. */
+    Entry[0] = 0;
+    Entry[1] = 0x14;
+    Entry[2] = 1;
+    Entry[3] = 0;
+    TocAddress (Entry + 4, 0, Msf);
+    Entry += 8;
+    Length += 8;
+  }
+  Entry[0] = 0;
+  Entry[1] = 0x14;
+  Entry[2] = 0xaa;
+  Entry[3] = 0;
+  TocAddress (Entry + 4, LeadOut, Msf);
+  Length += 8;
+  /* The data length counts everything after the length field. */
+  Bot->Response[0] = (UINT8)((2 + Length) >> 8);
+  Bot->Response[1] = (UINT8)(2 + Length);
+  return MIN (4U + Length, Allocation);
 }
 
 STATIC UINT32
@@ -196,31 +411,36 @@ ScsiCommand (
        * SPC-2 (0x04) makes Linux scan sequentially and never request the
        * per-LUN serial number page.
        */
+      Bot->Response[0] = Bot->PeripheralType;
       Bot->Response[2] = 5;
       Bot->Response[3] = 2;
       Bot->Response[4] = 31;
-      CopyMem (Bot->Response + 8, Bot->IsPartition
-               ? "GBL     PARTITION       0001" : "GBL     RAM DISK        0001", 28);
+      if (Bot->PeripheralType == GBL_MSC_PERIPHERAL_CDROM) {
+        CopyMem (Bot->Response + 8, "GBL     ISO IMAGE       0007", 28);
+      } else if (Bot->IsFile) {
+        CopyMem (Bot->Response + 8, "GBL     FILE IMAGE      0007", 28);
+      } else if (Bot->IsPartition) {
+        CopyMem (Bot->Response + 8, "GBL     PARTITION       0007", 28);
+      } else {
+        CopyMem (Bot->Response + 8, "GBL     RAM DISK        0007", 28);
+      }
       Length = 36;
     } else {
       FailCommand (Bot, 5, 0x24);
     }
     return MIN (Length, ((UINT32)Command[3] << 8) | Command[4]);
   case 0x1a:
+    *Direction = GblMscDataIn;
+    return ModeSense (Bot, Command, FALSE);
   case 0x5a:
     *Direction = GblMscDataIn;
-    if ((Command[2] & 0x3f) != 0 && (Command[2] & 0x3f) != 0x3f) {
-      FailCommand (Bot, 5, 0x24);
-      return 0;
-    }
-    if (Opcode == 0x1a) {
-      Bot->Response[0] = 3;
-      Bot->Response[2] = 0x80;
-      return MIN (4U, Command[4]);
-    }
-    Bot->Response[1] = 6;
-    Bot->Response[3] = 0x80;
-    return MIN (8U, ((UINT32)Command[7] << 8) | Command[8]);
+    return ModeSense (Bot, Command, TRUE);
+  case 0x43:
+    *Direction = GblMscDataIn;
+    return ReadToc (Bot, Command);
+  case 0x46:
+    *Direction = GblMscDataIn;
+    return GetConfiguration (Bot, Command);
   case 0x1b:
     if ((Command[4] & 3) == 2) {
       if (Bot->PreventRemoval) {
@@ -385,7 +605,16 @@ GblMscBotBegin (IN OUT GBL_MSC_BOT *Bot, IN CONST UINT8 *Cbw, IN UINTN Size)
     if (Direction == GblMscDataOut) {
       Bot->Status = 2;
       Bot->HaltIn = TRUE;
-    } else if (Direction == GblMscNoData || DeviceLength == 0 || Bot->Status != 0) {
+    } else if (Bot->Status != 0) {
+      /*
+       * The command failed before producing data. Do not stall the IN
+       * endpoint: hosts treat a stalled data phase as a transport error and
+       * run bulk-only reset recovery, which hides the sense data (Linux only
+       * reports "I/O error", never the ILLEGAL REQUEST). Send a zero-length
+       * data stage instead so the host reads the CSW and then REQUEST SENSE.
+       */
+      Bot->InLength = 0;
+    } else if (Direction == GblMscNoData || DeviceLength == 0) {
       Bot->HaltIn = TRUE;
     } else {
       Bot->InLength = MIN (DeviceLength, Bot->HostLength);

@@ -12,8 +12,13 @@
 #define GBL_MSC_CBW_SIZE 31U
 #define GBL_MSC_CSW_SIZE 13U
 #define GBL_MSC_NAME_SIZE 37U
+#define GBL_MSC_PATH_SIZE 192U
 #define GBL_MSC_MAX_LUNS 4U
-#define GBL_MSC_SPEC_SIZE (GBL_MSC_NAME_SIZE * GBL_MSC_MAX_LUNS + GBL_MSC_MAX_LUNS)
+#define GBL_MSC_SPEC_SIZE (GBL_MSC_PATH_SIZE * GBL_MSC_MAX_LUNS + GBL_MSC_MAX_LUNS)
+#define GBL_MSC_ISO_BLOCK_SIZE 2048U
+#define GBL_MSC_FILE_BLOCK_SIZE 512U
+#define GBL_MSC_PERIPHERAL_DIRECT 0U
+#define GBL_MSC_PERIPHERAL_CDROM 5U
 
 typedef EFI_STATUS (*GBL_MSC_MEDIA_READ)(IN VOID *Context, IN UINT64 Offset,
                                         OUT VOID *Buffer, IN UINTN Size);
@@ -24,6 +29,8 @@ typedef struct {
   GBL_MSC_MEDIA_READ Read;
   VOID               *Context;
   BOOLEAN            IsPartition;
+  BOOLEAN            IsFile;
+  UINT8              PeripheralType;
   CHAR8              Name[GBL_MSC_NAME_SIZE];
   CHAR8              Serial[64];
 } GBL_MSC_MEDIA;
@@ -41,6 +48,8 @@ typedef struct {
   VOID               *ReadContext;
   CONST CHAR8        *Serial;
   BOOLEAN            IsPartition;
+  BOOLEAN            IsFile;
+  UINT8              PeripheralType;
   UINT32             Tag;
   UINT32             HostLength;
   UINT32             InLength;
