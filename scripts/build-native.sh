@@ -20,6 +20,8 @@ DEBUG=1
 AUTO=0
 VERBOSE=0
 MSC_PARTITIONS=0
+MSC_WRITE=0
+MSC_WRITE_PARTITIONS=0
 OUTPUT=""
 PREPARE_ONLY=0
 while [[ $# -gt 0 ]]; do
@@ -29,12 +31,18 @@ while [[ $# -gt 0 ]]; do
     --auto) AUTO=1; shift ;;
     --verbose) VERBOSE=1; shift ;;
     --experimental-usb-msc-partition-export) MSC_PARTITIONS=1; shift ;;
+    --experimental-usb-msc-write) MSC_PARTITIONS=1; MSC_WRITE=1; shift ;;
+    --experimental-usb-msc-write-partitions)
+      MSC_PARTITIONS=1; MSC_WRITE=1; MSC_WRITE_PARTITIONS=1; shift ;;
     --output)  OUTPUT="${2:?--output requires a path}"; shift 2 ;;
     --prepare-only) PREPARE_ONLY=1; shift ;;
     -h|--help)
-      echo "Usage: scripts/build-native.sh [--release|--debug] [--auto] [--verbose] [--experimental-usb-msc-partition-export] [--output PATH] [--prepare-only]"
+      echo "Usage: scripts/build-native.sh [--release|--debug] [--auto] [--verbose] [--experimental-usb-msc-partition-export|--experimental-usb-msc-write|--experimental-usb-msc-write-partitions] [--output PATH] [--prepare-only]"
       echo "Build firmware with the local AArch64 GCC toolchain; debug logging is enabled by default."
-      echo "Named-partition USB MSC export is disabled unless explicitly enabled; enabled builds remain read-only."
+      echo "Named-partition USB MSC export is disabled unless explicitly enabled; export builds are"
+      echo "read-only unless --experimental-usb-msc-write is also given, and only that build accepts"
+      echo "writes to the in-memory RAM LUN. Writable real partitions need the further, explicit"
+      echo "--experimental-usb-msc-write-partitions and an rw:<name> LUN spec."
       exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
@@ -82,6 +90,8 @@ SUFFIX=""
 [[ $DEBUG -eq 1 ]] && SUFFIX+="-debug"
 [[ $VERBOSE -eq 1 ]] && SUFFIX+="-verbose"
 [[ $MSC_PARTITIONS -eq 1 ]] && SUFFIX+="-msc-partitions"
+[[ $MSC_WRITE -eq 1 ]] && SUFFIX+="-msc-write"
+[[ $MSC_WRITE_PARTITIONS -eq 1 ]] && SUFFIX+="-msc-write-partitions"
 BUILD_NAME="gbl-chainload${SUFFIX}"
 OUTPUT="${OUTPUT:-dist/${BUILD_NAME}-gcc5.efi}"
 
@@ -147,12 +157,14 @@ MOD=Build/GblChainloadPkg/RELEASE_GCC5/AARCH64/GblChainloadPkg/Application/GblCh
 rm -f "$MOD/DEBUG/GblChainload.dll" "$MOD/OUTPUT/GblChainload.efi" \
       "$MOD/DEBUG/GblChainload.efi"
 
-echo ">>> EDK2 link: RELEASE auto=$AUTO debug=$DEBUG verbose=$VERBOSE msc_partitions=$MSC_PARTITIONS"
+echo ">>> EDK2 link: RELEASE auto=$AUTO debug=$DEBUG verbose=$VERBOSE msc_partitions=$MSC_PARTITIONS write=$MSC_WRITE write_partitions=$MSC_WRITE_PARTITIONS"
 build \
   -p GblChainloadPkg/GblChainloadPkg.dsc \
   -a AARCH64 -t GCC5 -b RELEASE \
   -D GBL_AUTO="$AUTO" -D GBL_DEBUG="$DEBUG" -D GBL_VERBOSE="$VERBOSE" \
   -D GBL_USB_MSC_PARTITION_EXPORT="$MSC_PARTITIONS" \
+  -D GBL_USB_MSC_WRITE="$MSC_WRITE" \
+  -D GBL_USB_MSC_WRITE_PARTITIONS="$MSC_WRITE_PARTITIONS" \
   -D GBL_BUILD_NAME="$BUILD_NAME" \
   -D GBL_CHAINLOAD_VERSION="$GBL_CHAINLOAD_VERSION"
 

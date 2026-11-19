@@ -68,6 +68,10 @@
   DEFINE GBL_DEBUG                        = 0
   DEFINE GBL_VERBOSE                      = 0
   DEFINE GBL_USB_MSC_PARTITION_EXPORT       = 0
+  # Write support is opt-in twice: the backend at all, then writable real
+  # partitions. A normal build has neither and refuses every WRITE.
+  DEFINE GBL_USB_MSC_WRITE                  = 0
+  DEFINE GBL_USB_MSC_WRITE_PARTITIONS       = 0
 
   # Build name — single string identifier substituted into log banner,
   # FastbootMenu display, and the gbl-chainload_build getvar.
@@ -216,6 +220,8 @@
   GCC:*_*_*_CC_FLAGS = -DGBL_DEBUG=$(GBL_DEBUG)
   GCC:*_*_*_CC_FLAGS = -DGBL_VERBOSE=$(GBL_VERBOSE)
   GCC:*_*_*_CC_FLAGS = -DGBL_USB_MSC_PARTITION_EXPORT=$(GBL_USB_MSC_PARTITION_EXPORT)
+  GCC:*_*_*_CC_FLAGS = -DGBL_USB_MSC_WRITE=$(GBL_USB_MSC_WRITE)
+  GCC:*_*_*_CC_FLAGS = -DGBL_USB_MSC_WRITE_PARTITIONS=$(GBL_USB_MSC_WRITE_PARTITIONS)
   GCC:*_*_*_CC_FLAGS = -DGBL_BUILD_NAME='"$(GBL_BUILD_NAME)"'
 
   # Workarounds for this Qualcomm edk2 fork against modern Ubuntu GCC:

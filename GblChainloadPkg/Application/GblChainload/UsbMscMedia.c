@@ -4,6 +4,7 @@
 #include <Protocol/BlockIo.h>
 #include <Protocol/SimpleFileSystem.h>
 #include <Library/BaseMemoryLib.h>
+#include <Library/DebugLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/DeviceInfo.h>
@@ -345,13 +346,108 @@ OpenFileMedia (
   return EFI_SUCCESS;
 }
 
+typedef struct {
+  UINT64 Size;
+} MSC_RAM;
+
 STATIC EFI_STATUS
 RamRead (IN VOID *Context, IN UINT64 Offset, OUT VOID *Buffer, IN UINTN Size)
 {
-  if (Offset > GBL_MSC_DISK_SIZE || Size > GBL_MSC_DISK_SIZE - Offset) {
+  MSC_RAM *Backing = Context;
+
+  if (Offset > Backing->Size || Size > Backing->Size - Offset) {
     return EFI_BAD_BUFFER_SIZE;
   }
-  CopyMem (Buffer, (UINT8 *)Context + (UINTN)Offset, Size);
+  CopyMem (Buffer, (UINT8 *)Backing + sizeof (*Backing) + (UINTN)Offset, Size);
+  return EFI_SUCCESS;
+}
+
+#if GBL_USB_MSC_WRITE
+/*
+ * Writes land in the same buffer the reads come from, in command order, so a
+ * read issued after a write always sees it. There is no write-back cache: the
+ * RAM is the medium, and nothing is left unwritten when a command completes.
+ */
+STATIC EFI_STATUS
+RamWrite (IN VOID *Context, IN UINT64 Offset, IN CONST VOID *Buffer, IN UINTN Size)
+{
+  MSC_RAM *Backing = Context;
+
+  if (Offset > Backing->Size || Size > Backing->Size - Offset) {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+  CopyMem ((UINT8 *)Backing + sizeof (*Backing) + (UINTN)Offset, Buffer, Size);
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS
+RamFlush (IN VOID *Context)
+{
+  (VOID)Context;
+  /* Volatile memory with no cache in front of it: nothing to commit. */
+  return EFI_SUCCESS;
+}
+#endif
+
+/*
+ * "ram:" is an explicit in-memory LUN, optionally sized in KiB ("ram:4096").
+ * The medium is private to this session: it starts as the same FAT12 example
+ * image the default RAM disk carries (1 MiB) or blank, and it is discarded
+ * when the session ends. Nothing it holds can reach real storage.
+ */
+STATIC EFI_STATUS
+OpenRamMedia (IN CONST CHAR8 *Spec, OUT GBL_MSC_MEDIA *Media)
+{
+  UINT64 Size = GBL_MSC_DISK_SIZE;
+  UINT64 Value = 0;
+  UINTN Index = 0;
+  MSC_RAM *Backing;
+  UINT8 *Disk;
+  STATIC CONST CHAR8 Hex[] = "0123456789abcdef";
+
+  if (Spec[0] != 0) {
+    while (Spec[Index] >= '0' && Spec[Index] <= '9') {
+      Value = Value * 10 + (UINT64)(Spec[Index] - '0');
+      if (Value > GBL_MSC_RAM_MAX_SIZE) {
+        return EFI_INVALID_PARAMETER;
+      }
+      Index++;
+    }
+    if (Spec[Index] != 0 || Index == 0) {
+      return EFI_INVALID_PARAMETER;
+    }
+    Size = Value * 1024;
+    if (Size < GBL_MSC_RAM_MIN_SIZE || Size > GBL_MSC_RAM_MAX_SIZE ||
+        Size % GBL_MSC_BLOCK_SIZE != 0) {
+      return EFI_INVALID_PARAMETER;
+    }
+  }
+  ZeroMem (Media, sizeof (*Media));
+  Backing = AllocateZeroPool ((UINTN)(sizeof (*Backing) + Size));
+  if (Backing == NULL) {
+    return EFI_OUT_OF_RESOURCES;
+  }
+  Backing->Size = Size;
+  Disk = (UINT8 *)Backing + sizeof (*Backing);
+  if (Size == GBL_MSC_DISK_SIZE) {
+    GblMscMakeDisk (Disk);
+  }
+  Media->Context = Backing;
+  Media->Size = Size;
+  Media->BlockSize = GBL_MSC_BLOCK_SIZE;
+  Media->Read = RamRead;
+  Media->Name[0] = 0;
+  CopyMem (Media->Name, "RAM disk", sizeof ("RAM disk"));
+  CopyMem (Media->Serial, "GBLRAM", 6);
+  for (Index = 0; Index < 6; Index++) {
+    Media->Serial[6 + Index] = Hex[((Size / 1024) >> ((5 - Index) * 4)) & 0xf];
+  }
+  CopyMem (Media->Serial + 12, "-MSC", 5);
+#if GBL_USB_MSC_WRITE
+  Media->Write = RamWrite;
+  Media->Flush = RamFlush;
+  Media->Writable = TRUE;
+#endif
   return EFI_SUCCESS;
 }
 
@@ -410,6 +506,101 @@ PartitionRead (IN VOID *Context, IN UINT64 Offset, OUT VOID *Buffer, IN UINTN Si
   return EFI_SUCCESS;
 }
 
+#if GBL_USB_MSC_WRITE_PARTITIONS
+/*
+ * Partition writes. Only compiled into builds that opt in, so a normal image
+ * has no block write call at all. Two properties matter:
+ *
+ *  - Every write is re-validated against the partition record it was opened
+ *    with. If the table changed (MediaId, block size, last block) the write is
+ *    abandoned with MEDIA CHANGED instead of landing on whatever now sits at
+ *    that LBA. The GPT itself is never in range: the LUN starts at the
+ *    partition's StartingLBA, and that is required to be at least 34, so the
+ *    primary and backup headers and entry arrays are unreachable.
+ *  - A block is never left half updated. A chunk that does not cover whole
+ *    logical blocks is read-modify-written, so a power cut leaves either the
+ *    old block or the new block, never a mixture of the two.
+ */
+STATIC EFI_STATUS
+PartitionWrite (IN VOID *Context, IN UINT64 Offset, IN CONST VOID *Buffer, IN UINTN Size)
+{
+  MSC_PARTITION *Partition = Context;
+  EFI_STATUS Status;
+  UINTN Skip;
+  UINTN Length;
+  CONST UINT8 *Source = Buffer;
+
+  if (Offset > Partition->Size || Size > Partition->Size - Offset) {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+  Status = CheckMedia (Partition);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  while (Size != 0) {
+    Skip = (UINTN)(Offset % Partition->BlockSize);
+    if (Skip == 0) {
+      /* Whole blocks that fit the bounce buffer go out in one call. */
+      Length = (MIN (Size, MSC_MEDIA_BUFFER) / Partition->BlockSize) * Partition->BlockSize;
+      if (Length != 0) {
+        CopyMem (Partition->Buffer, Source, Length);
+        Status = Partition->BlockIo->WriteBlocks (Partition->BlockIo, Partition->MediaId,
+                     Offset / Partition->BlockSize, Length, Partition->Buffer);
+        if (EFI_ERROR (Status)) {
+          return Status;
+        }
+        Status = CheckMedia (Partition);
+        if (EFI_ERROR (Status)) {
+          return Status;
+        }
+        Source += Length;
+        Offset += Length;
+        Size -= Length;
+        continue;
+      }
+    }
+    /* One partial block: read it, patch the covered bytes, write it back. */
+    Length = MIN (Size, Partition->BlockSize - Skip);
+    Status = Partition->BlockIo->ReadBlocks (Partition->BlockIo, Partition->MediaId,
+                 Offset / Partition->BlockSize, Partition->BlockSize, Partition->Buffer);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+    CopyMem (Partition->Buffer + Skip, Source, Length);
+    Status = Partition->BlockIo->WriteBlocks (Partition->BlockIo, Partition->MediaId,
+                 Offset / Partition->BlockSize, Partition->BlockSize, Partition->Buffer);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+    Status = CheckMedia (Partition);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+    Source += Length;
+    Offset += Length;
+    Size -= Length;
+  }
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS
+PartitionFlush (IN VOID *Context)
+{
+  MSC_PARTITION *Partition = Context;
+  EFI_STATUS Status;
+
+  Status = CheckMedia (Partition);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  if (Partition->BlockIo->FlushBlocks == NULL) {
+    /* The medium has no cache of its own: nothing to commit. */
+    return EFI_SUCCESS;
+  }
+  return Partition->BlockIo->FlushBlocks (Partition->BlockIo);
+}
+#endif
+
 VOID
 GblMscMediaClose (IN OUT GBL_MSC_MEDIA *Media)
 {
@@ -417,6 +608,13 @@ GblMscMediaClose (IN OUT GBL_MSC_MEDIA *Media)
   MSC_FILE *File;
 
   if (Media->Context != NULL) {
+    /*
+     * Last barrier before the medium is released: a writable LUN that was
+     * closed without an eject must not lose an acknowledged write.
+     */
+    if (Media->Writable && Media->Flush != NULL) {
+      (VOID)Media->Flush (Media->Context);
+    }
     if (Media->IsPartition) {
       Partition = Media->Context;
       if (Partition->Allocation != NULL) {
@@ -444,6 +642,7 @@ GblMscMediaOpen (IN CONST CHAR8 *Name, OUT GBL_MSC_MEDIA *Media)
   UINTN Count;
   UINTN Index;
   UINTN Matches = 0;
+  BOOLEAN Writable = FALSE;
   EFI_PARTITION_ENTRY *Entry;
   EFI_PARTITION_ENTRY SelectedEntry;
   EFI_BLOCK_IO_PROTOCOL *BlockIo = NULL;
@@ -456,23 +655,33 @@ GblMscMediaOpen (IN CONST CHAR8 *Name, OUT GBL_MSC_MEDIA *Media)
 
   ZeroMem (Media, sizeof (*Media));
   if (Name == NULL || Name[0] == 0) {
-    Media->Context = AllocateZeroPool (GBL_MSC_DISK_SIZE);
-    if (Media->Context == NULL) {
-      return EFI_OUT_OF_RESOURCES;
-    }
-    GblMscMakeDisk (Media->Context);
-    Media->Size = GBL_MSC_DISK_SIZE;
-    Media->BlockSize = GBL_MSC_BLOCK_SIZE;
-    Media->Read = RamRead;
-    CopyMem (Media->Name, "RAM disk", sizeof ("RAM disk"));
-    CopyMem (Media->Serial, "GBLRAM0001-MSC", sizeof ("GBLRAM0001-MSC"));
-    return EFI_SUCCESS;
+    return OpenRamMedia ("", Media);
+  }
+  if (HasPrefix (Name, "ram:")) {
+    return OpenRamMedia (Name + 4, Media);
   }
   if (HasPrefix (Name, "iso:")) {
     return OpenFileMedia ("iso:", Name + 4, TRUE, Media);
   }
   if (HasPrefix (Name, "file:")) {
     return OpenFileMedia ("file:", Name + 5, FALSE, Media);
+  }
+  if (HasPrefix (Name, "rw:")) {
+#if GBL_USB_MSC_WRITE_PARTITIONS
+    /* Explicit opt-in, and only in a build that carries the write backend. */
+    Writable = TRUE;
+    Name += 3;
+#else
+    /*
+     * A normal build has no block write path at all, so the spec is refused
+     * here instead of being accepted as a read-only LUN: a name that says
+     * "rw" must never silently behave like "ro".
+     */
+    return EFI_SECURITY_VIOLATION;
+#endif
+  }
+  if (HasPrefix (Name, "ro:")) {
+    Name += 3;
   }
   if (!ValidName (Name)) {
     return EFI_INVALID_PARAMETER;
@@ -506,6 +715,11 @@ GblMscMediaOpen (IN CONST CHAR8 *Name, OUT GBL_MSC_MEDIA *Media)
   if (BlockIo == NULL || BlockIo->Media == NULL || BlockIo->ReadBlocks == NULL) {
     return EFI_UNSUPPORTED;
   }
+#if GBL_USB_MSC_WRITE_PARTITIONS
+  if (Writable && BlockIo->WriteBlocks == NULL) {
+    return EFI_UNSUPPORTED;
+  }
+#endif
   BlockMedia = BlockIo->Media;
   if (!BlockMedia->MediaPresent) {
     return EFI_NO_MEDIA;
@@ -516,6 +730,17 @@ GblMscMediaOpen (IN CONST CHAR8 *Name, OUT GBL_MSC_MEDIA *Media)
       BlockMedia->LastBlock >= MAX_UINT64 / BlockMedia->BlockSize ||
       SelectedEntry.StartingLBA == 0 || SelectedEntry.EndingLBA < SelectedEntry.StartingLBA ||
       SelectedEntry.EndingLBA - SelectedEntry.StartingLBA != BlockMedia->LastBlock) {
+    return EFI_UNSUPPORTED;
+  }
+  if (Writable && SelectedEntry.StartingLBA < 34) {
+    /*
+     * The first 34 LBAs hold the protective MBR, the GPT header and the entry
+     * array. A partition that starts inside them is not something this export
+     * will hand out with write access: the table would be one stray write away
+     * from being destroyed.
+     */
+    DEBUG ((DEBUG_ERROR, "USB MSC: refusing writable partition at LBA %Lu\n",
+            SelectedEntry.StartingLBA));
     return EFI_UNSUPPORTED;
   }
   Alignment = MAX ((UINTN)BlockMedia->IoAlign, (UINTN)1);
@@ -544,10 +769,17 @@ GblMscMediaOpen (IN CONST CHAR8 *Name, OUT GBL_MSC_MEDIA *Media)
   Media->Size = Partition->Size;
   Media->BlockSize = Partition->BlockSize;
   Media->Read = PartitionRead;
+#if GBL_USB_MSC_WRITE_PARTITIONS
+  if (Writable) {
+    Media->Write = PartitionWrite;
+    Media->Flush = PartitionFlush;
+    Media->Writable = TRUE;
+  }
+#endif
   for (Index = 0; Name[Index] != 0; Index++) {
     Media->Name[Index] = Name[Index];
   }
-  CopyMem (Media->Serial, "GBLRO-", 6);
+  CopyMem (Media->Serial, Writable ? "GBLRW-" : "GBLRO-", 6);
   GuidBytes = (CONST UINT8 *)&SelectedEntry.UniquePartitionGUID;
   for (Index = 0; Index < sizeof (SelectedEntry.UniquePartitionGUID); Index++) {
     Media->Serial[6 + Index * 2] = Hex[GuidBytes[Index] >> 4];

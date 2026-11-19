@@ -73,6 +73,7 @@ typedef struct {
   UINTN TransferLimit;
   UINTN AbortTicks;
   UINT32 ReadOffset;
+  UINT32 WriteOffset;
   UINT32 OutRemaining;
   UINT16 BulkPacket;
   UINT16 ControlPacket;
@@ -365,7 +366,13 @@ STATIC EFI_STATUS
 QueueCsw (IN OUT MSC_USB *Msc)
 {
   Msc->BulkState = MscSendCsw;
-  GblMscBotCsw (ACTIVE_BOT (Msc), Msc->ReadOffset, Msc->Transfers[3].Buffer);
+  /*
+   * Exactly one of the two counters moves for a given command: a data-in
+   * command advances ReadOffset, a data-out command WriteOffset. Adding them
+   * keeps the reported residue correct for both without another field.
+   */
+  GblMscBotCsw (ACTIVE_BOT (Msc), Msc->ReadOffset + Msc->WriteOffset,
+                Msc->Transfers[3].Buffer);
   return QueueTransfer (Msc, 3, GBL_MSC_CSW_SIZE);
 }
 
@@ -405,6 +412,7 @@ StartCommand (IN OUT MSC_USB *Msc, IN UINTN Size)
   UINTN Length;
 
   Msc->ReadOffset = 0;
+  Msc->WriteOffset = 0;
   Lun = Size == GBL_MSC_CBW_SIZE
         ? ((CONST UINT8 *)Msc->Transfers[2].Buffer)[13] : 0;
   if (Lun >= Msc->LunCount) {
@@ -739,6 +747,7 @@ ControlComplete (IN OUT MSC_USB *Msc, IN UINTN Slot)
 STATIC EFI_STATUS
 TransferComplete (IN OUT MSC_USB *Msc, IN EFI_USBFN_TRANSFER_RESULT *Result)
 {
+  EFI_STATUS Status;
   UINTN Slot;
   MSC_TRANSFER *Transfer;
   GBL_MSC_BOT *Bot = ACTIVE_BOT (Msc);
@@ -783,6 +792,26 @@ TransferComplete (IN OUT MSC_USB *Msc, IN EFI_USBFN_TRANSFER_RESULT *Result)
     return QueueCsw (Msc);
   }
   if (Slot == 2 && Msc->BulkState == MscDiscardData) {
+    /*
+     * The OUT data is a WRITE payload or a MODE SELECT parameter list;
+     * GblMscBotWrite decides which and returns success when the command does
+     * not consume the data at all (a rejected write, which is drained and
+     * reported through the CSW). A failure mid-payload stops the transfer: the
+     * CSW carries the residue and the host re-reads the sense data.
+     */
+    if (Result->BytesTransferred != 0 && (Bot->ToDisk || Bot->ParamList != 0)) {
+      Status = GblMscBotWrite (Bot, Msc->WriteOffset, Msc->Transfers[2].Buffer,
+                               Result->BytesTransferred);
+      if (EFI_ERROR (Status)) {
+        Msc->WriteOffset += (UINT32)Result->BytesTransferred;
+        Msc->OutRemaining = 0;
+        if (Bot->Status == 0) {
+          Bot->Status = 1;
+        }
+        return QueueCsw (Msc);
+      }
+    }
+    Msc->WriteOffset += (UINT32)Result->BytesTransferred;
     Msc->OutRemaining -= (UINT32)Result->BytesTransferred;
     if (Msc->OutRemaining != 0) {
       return QueueTransfer (Msc, 2, MIN ((UINTN)Msc->OutRemaining, Msc->TransferLimit));
@@ -950,6 +979,7 @@ GblUsbMscRun (OUT BOOLEAN *Released)
   UINTN Size;
   UINTN Slot;
   UINTN LunIndex;
+  UINTN Writable;
   EFI_INPUT_KEY Key;
   BOOLEAN DisableZlp = FALSE;
 
@@ -1031,19 +1061,31 @@ GblUsbMscRun (OUT BOOLEAN *Released)
   } else {
     Status = EFI_SUCCESS;
   }
-  if (Msc->LunCount == 1) {
-    Print (L"GBL USB Mass Storage: read-only %a (%Lu bytes)\n"
-           L"All host writes are rejected.\n"
-           L"Eject the disk or press a volume key to return to Fastboot.\n",
-           Msc->Media[0].Name, Msc->Media[0].Size);
-  } else {
-    Print (L"GBL USB Mass Storage: read-only, %u LUNs\n"
-           L"All host writes are rejected.\n"
-           L"Eject the disks or press a volume key to return to Fastboot.\n",
-           Msc->LunCount);
+  Writable = 0;
+  for (LunIndex = 0; LunIndex < Msc->LunCount; LunIndex++) {
+    if (Msc->Media[LunIndex].Writable) {
+      Writable++;
+    }
   }
-  DEBUG ((DEBUG_INFO, "USB MSC: started, %u read-only LUN(s), VID=%04x PID=%04x\n",
-          Msc->LunCount, mMscVendor, mMscProduct));
+  for (LunIndex = 0; LunIndex < Msc->LunCount; LunIndex++) {
+    if (Msc->Media[LunIndex].Writable) {
+      Print (L"GBL USB Mass Storage: WRITABLE %a (%Lu bytes)\n",
+             Msc->Media[LunIndex].Name, Msc->Media[LunIndex].Size);
+    }
+  }
+  if (Writable != 0) {
+    Print (L"Writes to the WRITABLE LUN(s) are committed before the command completes.\n");
+  }
+  if (Writable != Msc->LunCount) {
+    Print (L"The other LUN(s) reject every write.\n");
+  }
+  if (Msc->LunCount == 1) {
+    Print (L"Eject the disk or press a volume key to return to Fastboot.\n");
+  } else {
+    Print (L"Eject the disks or press a volume key to return to Fastboot.\n");
+  }
+  DEBUG ((DEBUG_INFO, "USB MSC: started, %u LUN(s), %u writable, VID=%04x PID=%04x\n",
+          Msc->LunCount, Writable, mMscVendor, mMscProduct));
   while (!Msc->ExitRequested) {
     Size = sizeof (Payload);
     ZeroMem (&Payload, sizeof (Payload));
@@ -1080,7 +1122,19 @@ Stop:
       Msc->Usb->FreeTransferBuffer (Msc->Usb, Msc->Transfers[Slot].Buffer);
     }
   }
+  /*
+   * Teardown is the last barrier: whatever the host wrote and had
+   * acknowledged is committed before the media close, so leaving the session
+   * with a volume key does not drop an unflushed write.
+   */
   for (LunIndex = 0; LunIndex < GBL_MSC_MAX_LUNS; LunIndex++) {
+    if (Msc->Bot[LunIndex].Dirty) {
+      Status = GblMscBotFlush (&Msc->Bot[LunIndex]);
+      if (EFI_ERROR (Status)) {
+        DEBUG ((DEBUG_ERROR, "USB MSC: flush on exit failed: %r\n", Status));
+        Status = EFI_SUCCESS;
+      }
+    }
     GblMscMediaClose (&Msc->Media[LunIndex]);
   }
   FreePool (Msc);

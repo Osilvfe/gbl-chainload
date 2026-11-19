@@ -8,6 +8,8 @@ AUTO=0
 DEBUG=0
 VERBOSE=0
 MSC_PARTITIONS=0
+MSC_WRITE=0
+MSC_WRITE_PARTITIONS=0
 DO_RECOVERY=1
 DO_HOST=1
 while [[ $# -gt 0 ]]; do
@@ -16,11 +18,16 @@ while [[ $# -gt 0 ]]; do
     --debug) DEBUG=1; shift ;;
     --verbose) VERBOSE=1; shift ;;
     --experimental-usb-msc-partition-export) MSC_PARTITIONS=1; shift ;;
+    --experimental-usb-msc-write) MSC_PARTITIONS=1; MSC_WRITE=1; shift ;;
+    --experimental-usb-msc-write-partitions)
+      MSC_PARTITIONS=1; MSC_WRITE=1; MSC_WRITE_PARTITIONS=1; shift ;;
     --no-recovery) DO_RECOVERY=0; shift ;;
     --no-host) DO_HOST=0; shift ;;
     -h|--help)
       cat <<EOF
-Usage: $0 [--auto] [--debug] [--verbose] [--experimental-usb-msc-partition-export] [--no-recovery] [--no-host]
+Usage: $0 [--auto] [--debug] [--verbose]
+          [--experimental-usb-msc-partition-export|--experimental-usb-msc-write|--experimental-usb-msc-write-partitions]
+          [--no-recovery] [--no-host]
 
 Build with locally installed toolchains:
   1. Firmware staticlibs (Cargo, aarch64-unknown-none)
@@ -31,8 +38,10 @@ Build with locally installed toolchains:
 Firmware defaults to release logging. --auto, --debug and --verbose
 control entry policy and logging. Install mode is selected by the
 runtime GBLP1 manifest, not by a build-time --mode flag.
-Named-partition USB MSC export is disabled unless explicitly enabled;
-enabled builds remain read-only and use a -msc-partitions filename suffix.
+Named-partition USB MSC export is disabled unless explicitly enabled.
+Export builds are read-only until --experimental-usb-msc-write is added, which
+allows writes to the in-memory RAM LUN only; writable real partitions need
+--experimental-usb-msc-write-partitions and an explicit rw:<name> LUN.
 Build/ caches, including UniXNU components, are preserved.
 EOF
       exit 0 ;;
@@ -48,6 +57,14 @@ if [[ $VERBOSE -eq 1 ]]; then SUFFIX+="-verbose"; ARGS+=(--verbose); fi
 if [[ $MSC_PARTITIONS -eq 1 ]]; then
   SUFFIX+="-msc-partitions"
   ARGS+=(--experimental-usb-msc-partition-export)
+fi
+if [[ $MSC_WRITE -eq 1 ]]; then
+  SUFFIX+="-msc-write"
+  ARGS+=(--experimental-usb-msc-write)
+fi
+if [[ $MSC_WRITE_PARTITIONS -eq 1 ]]; then
+  SUFFIX+="-msc-write-partitions"
+  ARGS+=(--experimental-usb-msc-write-partitions)
 fi
 ARTIFACT="dist/gbl-chainload${SUFFIX}.efi"
 

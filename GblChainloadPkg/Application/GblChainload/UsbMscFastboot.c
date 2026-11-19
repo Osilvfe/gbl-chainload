@@ -15,7 +15,7 @@ STATIC BOOLEAN mMscRequested;
 
 STATIC CONST CHAR8 *const mMediaUsage =
   "usage: oem usb-msc [name[,name...]] "
-  "(partition name, iso:path or file:path)";
+  "(partition name, ram:[KiB], iso:path or file:path)";
 
 STATIC BOOLEAN
 IsFileSpec (IN CONST CHAR8 *Spec)
@@ -28,6 +28,29 @@ IsFileSpec (IN CONST CHAR8 *Spec)
     }
   }
   return FALSE;
+}
+
+/*
+ * The acknowledgement has to match what the LUN will really do: a writable
+ * RAM disk or an opt-in partition must not be announced as read-only, and a
+ * read-only one must never look writable.
+ */
+STATIC CONST CHAR8 *
+MediaMessage (IN CONST CHAR8 *Spec, IN UINTN Length)
+{
+  if (Length == 0) {
+    return "switching to RAM disk";
+  }
+  if (Spec[0] == 'r' && Spec[1] == 'a' && Spec[2] == 'm' &&
+      (Spec[3] == ':' || Spec[3] == ',' || Spec[3] == 0)) {
+    return GBL_USB_MSC_WRITE ? "switching to writable RAM disk"
+                             : "switching to read-only RAM disk";
+  }
+  if (Spec[0] == 'r' && Spec[1] == 'w' && Spec[2] == ':') {
+    return "switching to writable partition (explicit rw: opt-in)";
+  }
+  return IsFileSpec (Spec) ? "switching to read-only file media"
+                           : "switching to read-only partition";
 }
 
 STATIC VOID
@@ -82,6 +105,9 @@ CmdUsbMsc (IN CONST CHAR8 *Argument, IN VOID *Data, IN UINT32 Size)
       FastbootFail ("partition export requires an unlocked device");
     } else if (Status == EFI_NO_MAPPING) {
       FastbootFail ("partition name is ambiguous");
+    } else if (Status == EFI_SECURITY_VIOLATION) {
+      FastbootFail ("writable partition export is disabled in this build; "
+                    "use a read-only name");
     } else if (Status == EFI_NOT_FOUND && NameLength != 0) {
       FastbootFail ("media not found; use an exact partition name, "
                     "iso:<path> or file:<path>");
@@ -90,9 +116,7 @@ CmdUsbMsc (IN CONST CHAR8 *Argument, IN VOID *Data, IN UINT32 Size)
     }
     return;
   }
-  FastbootOkay (NameLength == 0 ? "switching to read-only RAM disk"
-             : (IsFileSpec (Partition) ? "switching to read-only file media"
-                                       : "switching to read-only partition"));
+  FastbootOkay (MediaMessage (Partition, NameLength));
   for (Attempt = 0; Attempt < 5000; Attempt++) {
     PayloadSize = sizeof (Payload);
     Message = UsbDeviceEventNoEvent;

@@ -108,6 +108,9 @@ GblMscBotInitMedia (OUT GBL_MSC_BOT *Bot, IN CONST GBL_MSC_MEDIA *Media)
 {
   GblMscBotInit (Bot, NULL, Media->Size);
   Bot->Read = Media->Read;
+  Bot->Write = Media->Write;
+  Bot->Flush = Media->Flush;
+  Bot->Writable = Media->Writable;
   Bot->ReadContext = Media->Context;
   Bot->IsPartition = Media->IsPartition;
   Bot->IsFile = Media->IsFile;
@@ -131,15 +134,53 @@ FailCommand (IN OUT GBL_MSC_BOT *Bot, IN UINT8 Sense, IN UINT8 Asc)
 #define GBL_MSC_MODE_HEADER_6 4U
 #define GBL_MSC_MODE_HEADER_10 8U
 #define GBL_MSC_MODE_BLOCK_DESCRIPTOR 8U
+#define GBL_MSC_MODE_PAGE_RECOVERY 0x01U
 #define GBL_MSC_MODE_PAGE_CACHING 0x08U
 #define GBL_MSC_MODE_PAGE_CONTROL 0x0aU
+#define GBL_MSC_MODE_PAGE_INFORMATIONAL 0x1cU
 #define GBL_MSC_MODE_PAGE_CAPABILITIES 0x2aU
 #define GBL_MSC_MODE_PAGE_ALL 0x3fU
 
 /*
+ * SBC-3 read/write error recovery page. Every recovery action stays off: the
+ * LUN either returns CHECK CONDITION for a bad block or, on writable media,
+ * reports the failure to the host, and never silently retries or reallocates
+ * a block. That is the only honest answer for an image or a partition we
+ * cannot spare, and it keeps a failed read from being hidden behind a zero
+ * fill. The page exists so tools that probe for it do not treat the LUN as
+ * SCSI-1.
+ */
+STATIC UINT32
+RecoveryPage (OUT UINT8 *Page)
+{
+  ZeroMem (Page, 12);
+  Page[0] = GBL_MSC_MODE_PAGE_RECOVERY;
+  Page[1] = 10;
+  return 12;
+}
+
+/*
+ * SPC-3 informational exceptions control page. Nothing is logged and no
+ * exception condition is generated: the medium cannot develop a predictive
+ * failure the device could report, so every field is zero and TEST stays off.
+ */
+STATIC UINT32
+InformationalPage (OUT UINT8 *Page)
+{
+  ZeroMem (Page, 10);
+  Page[0] = GBL_MSC_MODE_PAGE_INFORMATIONAL;
+  Page[1] = 8;
+  return 10;
+}
+
+/*
  * SBC-3 caching page: no read cache, write cache disabled (WCE=0) so hosts
- * report "write through", and no prefetch. Every value is fixed; the page is
- * the same for current and default values.
+ * report "write through", and no prefetch. WCE stays 0 on writable media too:
+ * a write that the host already saw acknowledged must survive a power cut, so
+ * every write reaches the medium before the command completes and
+ * SYNCHRONIZE CACHE only has the medium's own cache to flush. Advertising a
+ * write-back cache we do not keep would be a promise this device cannot hold.
+ * Every value is fixed; the page is the same for current and default values.
  */
 STATIC UINT32
 CachingPage (OUT UINT8 *Page)
@@ -212,8 +253,9 @@ ModeSense (
   UINT8 *Page;
 
   if ((PageControl != 0 && PageControl != 2) ||
-      (PageCode != 0 && PageCode != GBL_MSC_MODE_PAGE_CACHING &&
-       PageCode != GBL_MSC_MODE_PAGE_CONTROL && PageCode != GBL_MSC_MODE_PAGE_ALL &&
+      (PageCode != 0 && PageCode != GBL_MSC_MODE_PAGE_RECOVERY &&
+       PageCode != GBL_MSC_MODE_PAGE_CACHING && PageCode != GBL_MSC_MODE_PAGE_CONTROL &&
+       PageCode != GBL_MSC_MODE_PAGE_INFORMATIONAL && PageCode != GBL_MSC_MODE_PAGE_ALL &&
        !(PageCode == GBL_MSC_MODE_PAGE_CAPABILITIES &&
          Bot->PeripheralType == GBL_MSC_PERIPHERAL_CDROM))) {
     FailCommand (Bot, 5, 0x24);
@@ -221,11 +263,18 @@ ModeSense (
   }
   Page = Bot->Response + Header + BlockDescriptor;
   Length = 0;
+  /* Pages are emitted in ascending page-code order, as hosts expect. */
+  if (PageCode == GBL_MSC_MODE_PAGE_RECOVERY || PageCode == GBL_MSC_MODE_PAGE_ALL) {
+    Length += RecoveryPage (Page + Length);
+  }
   if (PageCode == GBL_MSC_MODE_PAGE_CACHING || PageCode == GBL_MSC_MODE_PAGE_ALL) {
     Length += CachingPage (Page + Length);
   }
   if (PageCode == GBL_MSC_MODE_PAGE_CONTROL || PageCode == GBL_MSC_MODE_PAGE_ALL) {
     Length += ControlPage (Page + Length);
+  }
+  if (PageCode == GBL_MSC_MODE_PAGE_INFORMATIONAL || PageCode == GBL_MSC_MODE_PAGE_ALL) {
+    Length += InformationalPage (Page + Length);
   }
   if (Bot->PeripheralType == GBL_MSC_PERIPHERAL_CDROM &&
       (PageCode == GBL_MSC_MODE_PAGE_CAPABILITIES || PageCode == GBL_MSC_MODE_PAGE_ALL)) {
@@ -315,6 +364,73 @@ GetEventStatusNotification (IN OUT GBL_MSC_BOT *Bot, IN CONST UINT8 *Command)
   Bot->Response[5] = 0x10;
   /* No event code follows because no descriptor is returned. */
   return MIN (8U, Allocation);
+}
+
+/*
+ * MODE SELECT(6)/(10) only validates: the LUN geometry, the page contents and
+ * the write-cache policy are fixed, so a well-formed parameter list that asks
+ * for the values already in effect is accepted and changes nothing. Anything
+ * the device cannot honour (a different write-cache state, an unknown page, a
+ * block descriptor that does not match the LUN) is INVALID FIELD IN PARAMETER
+ * LIST, and a list that does not parse is a PARAMETER LIST LENGTH ERROR.
+ *
+ * The list arrives through GblMscBotWrite in transfer-sized chunks; the check
+ * runs once the last byte is in, before the CSW is queued.
+ */
+STATIC VOID
+ModeSelectValidate (IN OUT GBL_MSC_BOT *Bot, IN BOOLEAN Ten)
+{
+  UINT32 Header = Ten ? GBL_MSC_MODE_HEADER_10 : GBL_MSC_MODE_HEADER_6;
+  UINT32 BlockDescriptor;
+  UINT32 Offset;
+  UINT32 Size;
+  UINT8 PageCode;
+
+  if (Bot->OutLength < Header) {
+    FailCommand (Bot, 5, 0x1a);
+    return;
+  }
+  BlockDescriptor = Ten
+                    ? (((UINT32)Bot->Response[6] << 8) | Bot->Response[7])
+                    : Bot->Response[3];
+  if (BlockDescriptor != 0 && BlockDescriptor != GBL_MSC_MODE_BLOCK_DESCRIPTOR) {
+    FailCommand (Bot, 5, 0x26);
+    return;
+  }
+  if (Header + BlockDescriptor > Bot->OutLength) {
+    FailCommand (Bot, 5, 0x1a);
+    return;
+  }
+  Offset = Header + BlockDescriptor;
+  while (Offset + 2 <= Bot->OutLength) {
+    PageCode = (UINT8)(Bot->Response[Offset] & 0x3f);
+    Size = Bot->Response[Offset + 1];
+    if (Offset + 2 + Size > Bot->OutLength) {
+      FailCommand (Bot, 5, 0x1a);
+      return;
+    }
+    switch (PageCode) {
+    case GBL_MSC_MODE_PAGE_RECOVERY:
+    case GBL_MSC_MODE_PAGE_CONTROL:
+    case GBL_MSC_MODE_PAGE_INFORMATIONAL:
+      /* Every field is fixed; the requested values are ignored. */
+      break;
+    case GBL_MSC_MODE_PAGE_CACHING:
+      /* The write cache cannot be switched on: WCE must stay clear. */
+      if (Size < 2 || (Bot->Response[Offset + 2] & 0x04) != 0) {
+        FailCommand (Bot, 5, 0x26);
+        return;
+      }
+      break;
+    default:
+      FailCommand (Bot, 5, 0x26);
+      return;
+    }
+    Offset += 2 + Size;
+  }
+  if (Offset != Bot->OutLength) {
+    FailCommand (Bot, 5, 0x1a);
+  }
 }
 
 /*
@@ -471,13 +587,13 @@ ScsiCommand (
       Bot->Response[3] = 2;
       Bot->Response[4] = 31;
       if (Bot->PeripheralType == GBL_MSC_PERIPHERAL_CDROM) {
-        CopyMem (Bot->Response + 8, "GBL     ISO IMAGE       0008", 28);
+        CopyMem (Bot->Response + 8, "GBL     ISO IMAGE       0009", 28);
       } else if (Bot->IsFile) {
-        CopyMem (Bot->Response + 8, "GBL     FILE IMAGE      0008", 28);
+        CopyMem (Bot->Response + 8, "GBL     FILE IMAGE      0009", 28);
       } else if (Bot->IsPartition) {
-        CopyMem (Bot->Response + 8, "GBL     PARTITION       0008", 28);
+        CopyMem (Bot->Response + 8, "GBL     PARTITION       0009", 28);
       } else {
-        CopyMem (Bot->Response + 8, "GBL     RAM DISK        0008", 28);
+        CopyMem (Bot->Response + 8, "GBL     RAM DISK        0009", 28);
       }
       Length = 36;
     } else {
@@ -490,6 +606,28 @@ ScsiCommand (
   case 0x5a:
     *Direction = GblMscDataIn;
     return ModeSense (Bot, Command, TRUE);
+  case 0x15:
+  case 0x55: {
+    /*
+     * The parameter list is small (a header, an optional block descriptor and
+     * a few pages), so it is buffered whole and validated once it is complete.
+     * A list longer than the buffer is refused before the data stage, which
+     * keeps a host from streaming an unbounded amount into the device.
+     */
+    UINT32 ListLength = Opcode == 0x15
+                        ? Command[4]
+                        : (((UINT32)Command[7] << 8) | Command[8]);
+
+    if (ListLength > sizeof (Bot->Response)) {
+      FailCommand (Bot, 5, 0x1a);
+      return 0;
+    }
+    if (ListLength != 0) {
+      Bot->ParamList = Opcode == 0x15 ? 1 : 2;
+      *Direction = GblMscDataOut;
+    }
+    return ListLength;
+  }
   case 0x43:
     *Direction = GblMscDataIn;
     return ReadToc (Bot, Command);
@@ -504,6 +642,9 @@ ScsiCommand (
       if (Bot->PreventRemoval) {
         FailCommand (Bot, 5, 0x53);
         Bot->Ascq = 2;
+      } else if (EFI_ERROR (GblMscBotFlush (Bot))) {
+        /* The sense data is set: the media stays until the flush succeeds. */
+        return 0;
       } else {
         Bot->MediaPresent = FALSE;
         Bot->EjectRequested = TRUE;
@@ -571,6 +712,13 @@ ScsiCommand (
     return 0;
   case 0x35:
   case 0x91:
+    /*
+     * A real barrier: on writable media this is the host telling us to commit
+     * everything it has already had acknowledged. For a read-only LUN there is
+     * nothing to flush and the command is a no-op success, which is what SBC
+     * requires.
+     */
+    (VOID)GblMscBotFlush (Bot);
     return 0;
   case 0x08:
   case 0x0a:
@@ -599,14 +747,23 @@ ScsiCommand (
       return 0;
     }
     Length = Blocks * BlockSize;
-    if (Write) {
-      FailCommand (Bot, 7, 0x27);
-    } else if (Lba > Bot->DiskSize / BlockSize ||
-               Blocks > Bot->DiskSize / BlockSize - Lba) {
+    /*
+     * A refused command keeps its declared length: the transport then sends a
+     * short (or zero-length) data stage so the host reads the CSW and the sense
+     * data, instead of seeing a stalled endpoint. The data is dropped in
+     * GblMscBotWrite because ToDisk/FromDisk stay clear.
+     */
+    if (Lba > Bot->DiskSize / BlockSize ||
+        Blocks > Bot->DiskSize / BlockSize - Lba) {
       FailCommand (Bot, 5, 0x21);
+    } else if (Write && !Bot->Writable) {
+      FailCommand (Bot, 7, 0x27);
     } else {
       Bot->FromDisk = TRUE;
       Bot->DiskOffset = Lba * BlockSize;
+      if (Write) {
+        Bot->ToDisk = TRUE;
+      }
     }
     break;
   default:
@@ -630,6 +787,8 @@ GblMscBotBegin (IN OUT GBL_MSC_BOT *Bot, IN CONST UINT8 *Cbw, IN UINTN Size)
   Bot->OutLength = 0;
   Bot->Status = 0;
   Bot->FromDisk = FALSE;
+  Bot->ToDisk = FALSE;
+  Bot->ParamList = 0;
   Bot->HaltIn = FALSE;
   Bot->HaltOut = FALSE;
   ZeroMem (Bot->Response, sizeof (Bot->Response));
@@ -692,6 +851,23 @@ GblMscBotBegin (IN OUT GBL_MSC_BOT *Bot, IN CONST UINT8 *Cbw, IN UINTN Size)
   return EFI_SUCCESS;
 }
 
+/*
+ * Map a media-layer status onto sense data. A missing or replaced medium has
+ * its own key so a host does not treat it as a plain hardware fault; anything
+ * else is an unrecovered read error or a write error, depending on direction.
+ */
+STATIC VOID
+MediaSense (IN OUT GBL_MSC_BOT *Bot, IN EFI_STATUS Status, IN BOOLEAN Write)
+{
+  if (Status == EFI_NO_MEDIA) {
+    FailCommand (Bot, 2, 0x3a);
+  } else if (Status == EFI_MEDIA_CHANGED) {
+    FailCommand (Bot, 6, 0x28);
+  } else {
+    FailCommand (Bot, 3, Write ? 0x0c : 0x11);
+  }
+}
+
 EFI_STATUS
 GblMscBotRead (IN OUT GBL_MSC_BOT *Bot, IN UINT32 Offset,
                OUT VOID *Buffer, IN UINTN Size)
@@ -712,8 +888,7 @@ GblMscBotRead (IN OUT GBL_MSC_BOT *Bot, IN UINT32 Offset,
     if (Bot->Read != NULL) {
       Status = Bot->Read (Bot->ReadContext, Bot->DiskOffset + Offset, Buffer, Size);
       if (EFI_ERROR (Status)) {
-        FailCommand (Bot, Status == EFI_NO_MEDIA ? 2 : Status == EFI_MEDIA_CHANGED ? 6 : 3,
-                          Status == EFI_NO_MEDIA ? 0x3a : Status == EFI_MEDIA_CHANGED ? 0x28 : 0x11);
+        MediaSense (Bot, Status, FALSE);
       }
       return Status;
     }
@@ -727,6 +902,87 @@ GblMscBotRead (IN OUT GBL_MSC_BOT *Bot, IN UINT32 Offset,
     }
     CopyMem (Buffer, Bot->Response + Offset, Size);
   }
+  return EFI_SUCCESS;
+}
+
+EFI_STATUS
+GblMscBotWrite (IN OUT GBL_MSC_BOT *Bot, IN UINT32 Offset,
+                IN CONST VOID *Buffer, IN UINTN Size)
+{
+  EFI_STATUS Status;
+
+  if (Size != 0 && Buffer == NULL) {
+    return EFI_INVALID_PARAMETER;
+  }
+  if (Offset > Bot->OutLength || Size > Bot->OutLength - Offset) {
+    return EFI_BAD_BUFFER_SIZE;
+  }
+  if (Bot->ParamList != 0) {
+    /*
+     * MODE SELECT parameter list: buffer the chunk and validate once the
+     * declared length has arrived. The list is bounded by sizeof (Response)
+     * before the data stage starts, so this copy cannot overflow.
+     */
+    if (Offset + Size > sizeof (Bot->Response)) {
+      FailCommand (Bot, 5, 0x1a);
+      return EFI_BAD_BUFFER_SIZE;
+    }
+    CopyMem (Bot->Response + Offset, Buffer, Size);
+    if (Offset + Size == Bot->OutLength && Bot->Status == 0) {
+      ModeSelectValidate (Bot, Bot->ParamList == 2);
+    }
+    return EFI_SUCCESS;
+  }
+  if (!Bot->ToDisk) {
+    /* Nothing consumes the data: a rejected or unsupported write is drained by
+     * the transport and only the CSW reports the failure. */
+    return EFI_SUCCESS;
+  }
+  if (!Bot->Writable || Bot->Write == NULL) {
+    FailCommand (Bot, 7, 0x27);
+    return EFI_WRITE_PROTECTED;
+  }
+  if (Bot->DiskOffset > Bot->DiskSize || Offset > Bot->DiskSize - Bot->DiskOffset ||
+      Size > Bot->DiskSize - Bot->DiskOffset - Offset) {
+    FailCommand (Bot, 5, 0x21);
+    return EFI_BAD_BUFFER_SIZE;
+  }
+  Status = Bot->Write (Bot->ReadContext, Bot->DiskOffset + Offset, Buffer, Size);
+  if (EFI_ERROR (Status)) {
+    MediaSense (Bot, Status, TRUE);
+    return Status;
+  }
+  Bot->Dirty = TRUE;
+  return EFI_SUCCESS;
+}
+
+/*
+ * SYNCHRONIZE CACHE, the eject path and teardown all funnel through here. A
+ * read-only LUN has nothing to flush and always succeeds; a writable one asks
+ * its backend for a real barrier, so a host that trusted an acknowledged write
+ * gets it on the medium before the command completes.
+ */
+EFI_STATUS
+GblMscBotFlush (IN OUT GBL_MSC_BOT *Bot)
+{
+  EFI_STATUS Status;
+
+  if (Bot->Flush == NULL || !Bot->Writable) {
+    Bot->Dirty = FALSE;
+    return EFI_SUCCESS;
+  }
+  Status = Bot->Flush (Bot->ReadContext);
+  if (EFI_ERROR (Status)) {
+    if (Status == EFI_NO_MEDIA || Status == EFI_MEDIA_CHANGED) {
+      MediaSense (Bot, Status, TRUE);
+    } else {
+      /* The medium is still there, so this is a hardware error, not a
+       * medium error. */
+      FailCommand (Bot, 4, 0x08);
+    }
+    return Status;
+  }
+  Bot->Dirty = FALSE;
   return EFI_SUCCESS;
 }
 
