@@ -239,6 +239,9 @@ fastboot oem boot-nodtbo
 测试，并已在 fairlady 上实机验证 `boot_a` 只读导出及反复切换/Fastboot
 恢复；其他机型和分区几何仍未验证。不自动选槽、不导出整盘，所有主机
 写入均被拒绝。
+实验路径还接受最多四个逗号分隔的精确分区名，分别作为独立 LUN，并保留
+各分区 512 或 4096 字节的逻辑块大小；支持 `REPORT LUNS`、64 位容量和
+`VERIFY(10)`，仍然仅使用 BOT 且保持只读。
 需要协同验证分区导出时，两套构建入口均接受
 `--experimental-usb-msc-partition-export`；启用后的构建标识和默认文件名
 带 `-msc-partitions`，不会启用主机写入。

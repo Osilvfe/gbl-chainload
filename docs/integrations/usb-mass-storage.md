@@ -1,8 +1,8 @@
 # Experimental USB Mass Storage
 
-GBL can temporarily replace its Fastboot USB interface with a single-LUN,
-read-only USB Mass Storage device. With no arguments it exposes a freshly
-generated 1 MiB FAT12 RAM disk containing `README.TXT`. Normal builds reject
+GBL can temporarily replace its Fastboot USB interface with a read-only USB
+Mass Storage device exposing up to four LUNs. With no arguments it exposes a
+freshly generated 1 MiB FAT12 RAM disk containing `README.TXT`. Normal builds reject
 partition arguments before storage access or USB handoff. The named-partition
 backend remains experimental, behind `GBL_USB_MSC_PARTITION_EXPORT=1`; host
 coverage includes a fairlady `boot_a` device test with repeated
@@ -62,11 +62,17 @@ fastboot oem usb-msc boot_a
 ```
 
 The name is exact and case-sensitive. `boot` does not select `boot_a` or
-`boot_b`; there is no current-slot fallback. Only one partition is exported,
-and duplicate GPT labels are rejected rather than choosing a UFS LUN.
+`boot_b`; there is no current-slot fallback. Up to four comma-separated
+exact names may be exported as separate LUNs, for example
+`fastboot oem usb-msc boot_a,boot_b`. Duplicate GPT labels are rejected
+rather than choosing a UFS LUN.
 Invalid names, whole-device handles, unsupported geometry, locked devices,
 and failed preflight reads fail before switching away from Fastboot.
 No partition label means the RAM test disk, never an implicit internal disk.
+Each LUN keeps the partition's 512- or 4096-byte logical block size. The
+implementation supports `REPORT LUNS`, 64-bit `READ CAPACITY(16)`, and
+`VERIFY(10)` in addition to the read data path; all write commands are still
+rejected with DATA PROTECT.
 
 The normal build retains the existing policy: timeout starts Android and
 Volume Up enters GBL Fastboot. Do not add `--auto` to this procedure: that
@@ -145,13 +151,22 @@ policies still apply. Do not flash EFISP just to try this feature.
 - `UsbMscScsi.c` generates the FAT image and implements bounded, read-only
   SCSI processing plus CBW/CSW validation and BOT direction/residue rules.
   Capacity and byte offsets are 64-bit; READ CAPACITY(16) and READ(16) cover
-  partitions beyond READ CAPACITY(10)'s address range. The USB-facing logical
-  sector size remains 512 bytes.
+  partitions beyond READ CAPACITY(10)'s address range. Each LUN reports its
+  backend's 512- or 4096-byte logical sector size; READ(6/10/12/16),
+  WRITE(6/10/12/16) rejection, REPORT LUNS and VERIFY(10) are bounded by that
+  size. Multiple LUNs need both BOT class paths to agree: GET MAX LUN returns
+  the highest LUN index, and each REPORT LUNS entry uses SCSI peripheral device
+  addressing (bus in byte 0, LUN in byte 1). A list that puts the LUN in the
+  leading byte is decoded by hosts as a different LUN number, so the export
+  then enumerates only LUN 0. INQUIRY reports SPC-3 (version `0x05`); hosts gate
+  VPD page 0x80/0x83, REPORT LUNS and multi-LUN probing on that level, so an
+  SPC-2 answer makes Linux fall back to a sequential LUN scan and never ask for
+  the per-LUN serial number page.
 - `UsbMscMedia.c` provides the RAM and partition read backends. A named export
   requires a unique GPT record and a non-removable logical-partition BlockIO
   handle with matching partition-relative geometry. No whole-disk or active
   slot lookup is used. Reads use a fixed 64 KiB aligned bounce buffer to
-  translate 512-byte USB requests to physical blocks of 512 to 65536 bytes,
+  translate logical-block requests to physical blocks of 512 to 65536 bytes,
   including unaligned reads on 4 KiB UFS media. Media ID, size, block size
   and alignment changes fail reads instead of silently switching media.
   Read errors return SCSI sense/failed status, preserving the Fastboot return
@@ -161,7 +176,8 @@ policies still apply. Do not flash EFISP just to try this feature.
   recovery. It requires protocol revision `0x00010003` or later. USB
   full/high/super-speed descriptors are provided; actual controller and
   host compatibility still require hardware testing.
-- `UsbMscFastboot.c` registers `oem usb-msc [exact-partition-name]`, rejects
+- `UsbMscFastboot.c` registers
+  `oem usb-msc [exact-partition-name[,exact-partition-name...]]`, rejects
   extra arguments and an in-flight flash, checks the protocol and partition,
   and waits at most five seconds for the Fastboot acknowledgement before
   requesting the handoff. Cancelled or timed-out handoffs release the
@@ -216,9 +232,23 @@ The harness also alternates RAM and partition media over 15 MSC sessions,
 covering eject, an initial detach followed by attach/detach, Volume Up,
 Volume Down and Escape exits while checking DMA and media cleanup. Both
 the default command guard and opt-in command path are compiled and tested.
+Additional cases cover four-LUN REPORT LUNS, LUN selection, invalid LUN
+sense, 4 KiB logical blocks, READ CAPACITY 16, VERIFY(10), and deterministic
+write rejection.
 
 These are simulated protocol and build checks, not proof that a particular
 phone enumerates MSC correctly. No device commands run as part of the test.
+
+On the 2026-11-19 fairlady test, direct SG_IO from the host confirmed the
+device replies correctly to `REPORT LUNS` (LUN list of `00 01 …` entries),
+`INQUIRY` page 0x00 and page 0x80 per LUN. The same host kernel
+(Linux 7.3.4-zen) nevertheless never issued an EVPD INQUIRY or a REPORT LUNS
+during `usb-storage` probing and did not cache page 0x80, even after
+`device/rescan`, so `lsblk SERIAL` showed the single USB string instead of the
+per-LUN serial and its scan log reported a sequential LUN scan. Treat that as a
+host quirk: verify identity with `REPORT LUNS`/SG_IO or the `HCTL` field, not
+with `lsblk SERIAL`. Writes are stopped before the device on such hosts:
+opening an exported LUN with write access fails with `EROFS`.
 
 ## Enumeration failure observed on fairlady
 

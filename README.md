@@ -240,6 +240,10 @@ its read-only backend has host coverage and a fairlady `boot_a` device test,
 including repeated RAM/partition switching and Fastboot resume. Other
 devices and partition geometries remain unverified. There is no automatic
 slot selection or whole-disk export; all host writes are rejected.
+The experimental path accepts up to four comma-separated exact partition
+names as separate LUNs and preserves each partition's 512- or 4096-byte
+logical block size; `REPORT LUNS`, 64-bit capacity and `VERIFY(10)` are
+supported. It remains BOT-only and read-only.
 For coordinated partition-export testing, both build entries accept
 `--experimental-usb-msc-partition-export`; enabled build names and default
 output filenames gain `-msc-partitions`. This does not enable host writes.
