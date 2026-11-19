@@ -118,13 +118,32 @@ block count and logical block size, and the implemented pages:
   so hosts select write-through instead of logging a missing caching page;
 - page `0x0a` (control): fixed-format sense data and no saved log
   parameters;
-- page code `0x3f` returns both pages, page code `0x00` returns only the
-  header and block descriptor.
+- page `0x2a` (CD/DVD capabilities and mechanical status), optical LUNs
+  only: a 20-byte page whose capability bits are all clear. A read-only
+  data image cannot record CD-R/RW, play CD-DA, return C2 pointers, read
+  DVD media or deliver sub-channel data, so claiming any of those would be
+  false. The speed and mechanical-status fields read zero ("not available")
+  rather than a guessed value. Answering ILLEGAL REQUEST here makes optical
+  tools downgrade the LUN to a bare SCSI-1 drive;
+- page code `0x3f` returns every page that applies to the LUN (the
+  capabilities page is appended after the control page for CD-ROM), page
+  code `0x00` returns only the header and block descriptor.
 
 The DBD bit suppresses the block descriptor. Page control `0` (current) and
 `2` (default) return the same bytes, `1` (changeable) and `3` (saved) are
-rejected with ILLEGAL REQUEST `5/0x24`, as are unimplemented page codes.
-The response is truncated to the allocation length.
+rejected with ILLEGAL REQUEST `5/0x24`, as are unimplemented page codes,
+including `0x2a` on a direct-access LUN. The response is truncated to the
+allocation length.
+
+### MMC event status
+
+`GET EVENT STATUS NOTIFICATION` (opcode `0x4a`) is implemented for optical
+LUNs. The image can never be ejected, replaced or written, so every poll
+answers "no event available" (NEA) with an empty event descriptor, while the
+supported-event-class mask still advertises the media class. Reporting a
+media event instead would make the host drop its cached capacity and
+re-read the disc on every check. On a direct-access LUN the opcode is
+rejected with INVALID COMMAND OPERATION CODE `5/0x20`.
 
 The normal build retains the existing policy: timeout starts Android and
 Volume Up enters GBL Fastboot. Do not add `--auto` to this procedure: that
@@ -287,8 +306,10 @@ it to `EFI/GBLMSC/selftest.bin`, for devices where no usable file exists yet.
 
 The GBL Fastboot phase (`run`) exports that file as `file:` and `iso:`,
 verifies logical block size, read-only flag, padded capacity, content hash,
-INQUIRY type, `MODE SENSE` header/block descriptor/pages and the MMC
-commands, tries a write on each LUN, and ejects back to Fastboot. A `mixed`
+INQUIRY type, `MODE SENSE` header/block descriptor/pages (including that
+page `0x2a` exists on the CD-ROM LUN and is refused on a direct-access one)
+and the MMC commands with their event-status answer, tries a write on each
+LUN, and ejects back to Fastboot. A `mixed`
 case exports `boot_a` together with the file LUN, and the reference hash comes
 from the device's own `sha256sum` of the recorded file. See
 [tests/device/README.md](../../tests/device/README.md) for the options; the
