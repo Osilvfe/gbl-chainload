@@ -146,8 +146,10 @@ writable export.
 ### MODE SENSE
 
 `MODE SENSE(6)` and `MODE SENSE(10)` return the mode header with the
-write-protected bit, an 8-byte block descriptor with the LUN's density,
-block count and logical block size, and the implemented pages:
+write-protected bit (set for a read-only LUN and clear for a writable one, so
+Linux exposes the writable RAM/`rw:` LUN without a manual `blockdev --setrw`),
+an 8-byte block descriptor with the LUN's density, block count and logical
+block size, and the implemented pages:
 
 - page `0x01` (read/write error recovery): a 12-byte page with every
   recovery parameter off. The LUNs perform no automatic retry, correction or
@@ -205,8 +207,9 @@ If Orange State or a startup hang appears before `oem usb-msc`, stop MSC
 testing and investigate the entry/chainload path first; do not flash or
 change slots as part of this test.
 
-The RAM test appears as a removable, write-protected disk labelled
-`GBL RAMDISK`. Inspect `README.TXT`. A real partition appears as a read-only
+The RAM test appears as a removable disk labelled `GBL RAM DISK`
+(write-protected in a plain build, writable in a write build). Inspect
+`README.TXT`. A real partition appears as a read-only
 disk with the partition's original bytes and capacity, without a synthetic
 partition table or filesystem. A raw boot image will not provide browsable
 files, and encrypted userdata remains encrypted. Do not accept formatting

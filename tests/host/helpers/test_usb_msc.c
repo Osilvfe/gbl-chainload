@@ -1668,6 +1668,22 @@ STATIC VOID ModeSenseTests (VOID) {
   Cbw[16] = 0;
   Cbw[23] = 9;
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 9);
+  /* A writable LUN must clear the write-protect bit in both headers: Linux
+   * reads the MODE SENSE WP bit before it exposes the medium for writes. */
+  Bot.Writable = TRUE;
+  MakeCbw (Cbw, 0x1a, 6, 96, TRUE);
+  Cbw[17] = 0x3f;
+  Cbw[19] = 96;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotRead (&Bot, 0, Data, 64) == EFI_SUCCESS);
+  assert ((Data[2] & 0x80) == 0);
+  MakeCbw (Cbw, 0x5a, 10, 96, TRUE);
+  Cbw[17] = 0x3f;
+  Cbw[23] = 96;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotRead (&Bot, 0, Data, 68) == EFI_SUCCESS);
+  assert ((Data[3] & 0x80) == 0);
+  Bot.Writable = FALSE;
 }
 
 STATIC VOID FileMediaTests (VOID) {

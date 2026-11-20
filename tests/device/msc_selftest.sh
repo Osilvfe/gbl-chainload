@@ -506,8 +506,10 @@ verify_file_lun() { # <row> <expected-block-size> <expected-type> <label>
     # can be tied to a specific EFISP. 0001 lacks the MODE SENSE/page refusals,
     # 0002/0003 were intermediate builds, 0004 added the short-packet data
     # stage, 0005/0006 were diagnostic builds, 0007 returns a real READ TOC
-    # lead-out so the host sizes a CD-ROM LUN correctly, and 0008 adds the MMC
-    # capabilities page and GET EVENT STATUS NOTIFICATION.
+    # lead-out so the host sizes a CD-ROM LUN correctly, 0008 adds the MMC
+    # capabilities page and GET EVENT STATUS NOTIFICATION, 0009 adds MODE SENSE
+    # pages 0x01/0x1c and the opt-in write backend, 0010 clears the MODE SENSE
+    # write-protect bit on a writable LUN.
     case "$revision" in
       0001|0002|0003|0004|0005|0006)
         note "product revision ${revision:-none}: predates the READ TOC lead-out fix"
@@ -519,6 +521,9 @@ verify_file_lun() { # <row> <expected-block-size> <expected-type> <label>
         note "product revision 0008: predates MODE SENSE pages 0x01/0x1c and the"
         note "opt-in write backend (0009); the page-length checks will fail until"
         note "a newer EFISP is staged" ;;
+      0009)
+        note "product revision 0009: a writable LUN still reports WP=1, so Linux"
+        note "mounts it read-only; stage a 0010 EFISP to exercise the write path" ;;
     esac
   else
     fail "$label INQUIRY failed: $(printf '%s' "$out" | tr '\n' ' ')"
@@ -638,7 +643,7 @@ describe_luns() { # <start-epoch>
 # and a write probe that distinguishes a read-only build from a writable one.
 verify_ram_lun() { # <row> <label>
   local row=$1 label=$2
-  local dev model lb ro sec out pages sense
+  local dev model lb ro sec out pages sense wp
   dev=$(row_field "$row" 1); model=$(row_field "$row" 2)
   lb=$(row_field "$row" 3); ro=$(row_field "$row" 4); sec=$(row_field "$row" 5)
 
@@ -668,9 +673,17 @@ verify_ram_lun() { # <row> <label>
   [ "$pages" = "01,08,0a,1c" ] && pass "$label MODE SENSE pages $pages" \
     || fail "$label MODE SENSE pages ${pages:-none} (expected 01,08,0a,1c)"
   check_page_lengths "$out" "$label"
+  wp=$(printf '%s' "$out" | sed -n 's/^mode6\.wp=//p')
+  if [ "$ro" = "0" ]; then
+    [ "$wp" = "0" ] && pass "$label MODE SENSE WP bit clear (writable LUN)" \
+      || fail "$label MODE SENSE WP bit ${wp:-missing} (expected 0 on a writable LUN)"
+  else
+    [ "$wp" = "1" ] && pass "$label MODE SENSE WP bit set (read-only LUN)" \
+      || fail "$label MODE SENSE WP bit ${wp:-missing} (expected 1 on a read-only LUN)"
+  fi
   printf '%s' "$out" | grep -qx "mode6_capabilities.status=check_condition" \
     && pass "$label page 2a refused (not an optical LUN)" \
-    || fail "$label page 2a accepted on a RAM disk"
+    || fail "$label page 2a accepted on a RAM disk (expected check condition)"
   check_mode_select "$dev" "$label"
 
   # The RAM LUN is the only medium the write backend is exercised on without
@@ -813,7 +826,7 @@ run_case() { # <label> <spec> <expected model:block:type> [<expected model:block
         [ "$lb" -ge 512 ] && pass "$label partition logical block size $lb" \
           || fail "$label partition logical block size $lb"
       fi
-    elif [ "$model" = "RAM disk" ]; then
+    elif [ "$model" = "RAM DISK" ]; then
       verify_ram_lun "$row" "$label/$model"
     else
       verify_file_lun "$row" "$block" "$ptype" "$label/$model"
@@ -905,7 +918,7 @@ cmd_run() {
       file)  run_case file "file:$MSC_PATH" "FILE IMAGE:512:0" || true ;;
       iso)   run_case iso "iso:$MSC_PATH" "ISO IMAGE:2048:5" || true ;;
       mixed) run_case mixed "boot_a,file:$MSC_PATH" "PARTITION:*:0" "FILE IMAGE:512:0" || true ;;
-      ram)   run_case ram "ram:" "RAM disk:*:0" || true ;;
+      ram)   run_case ram "ram:" "RAM DISK:*:0" || true ;;
       rw)
         [ -n "${MSC_RW_PARTITION:-}" ] || die "the rw case writes and restores the LAST block of a real partition; set MSC_RW_PARTITION=<name> (e.g. MSC_RW_PARTITION=userdata) to proceed"
         run_case rw "rw:$MSC_RW_PARTITION" "PARTITION:*:0" || true ;;

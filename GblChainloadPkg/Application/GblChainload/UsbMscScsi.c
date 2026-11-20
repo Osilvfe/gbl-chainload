@@ -284,7 +284,7 @@ ModeSense (
     Bot->Response[0] = (UINT8)((Header + BlockDescriptor + Length - 2) >> 8);
     Bot->Response[1] = (UINT8)(Header + BlockDescriptor + Length - 2);
     Bot->Response[2] = 0;
-    Bot->Response[3] = 0x80;
+    Bot->Response[3] = Bot->Writable ? 0 : 0x80;
     Bot->Response[4] = 0;
     Bot->Response[5] = 0;
     Bot->Response[6] = (UINT8)(BlockDescriptor >> 8);
@@ -292,7 +292,7 @@ ModeSense (
   } else {
     Bot->Response[0] = (UINT8)(Header + BlockDescriptor + Length - 1);
     Bot->Response[1] = 0;
-    Bot->Response[2] = 0x80;
+    Bot->Response[2] = Bot->Writable ? 0 : 0x80;
     Bot->Response[3] = (UINT8)BlockDescriptor;
   }
   if (BlockDescriptor != 0) {
@@ -587,13 +587,13 @@ ScsiCommand (
       Bot->Response[3] = 2;
       Bot->Response[4] = 31;
       if (Bot->PeripheralType == GBL_MSC_PERIPHERAL_CDROM) {
-        CopyMem (Bot->Response + 8, "GBL     ISO IMAGE       0009", 28);
+        CopyMem (Bot->Response + 8, "GBL     ISO IMAGE       0010", 28);
       } else if (Bot->IsFile) {
-        CopyMem (Bot->Response + 8, "GBL     FILE IMAGE      0009", 28);
+        CopyMem (Bot->Response + 8, "GBL     FILE IMAGE      0010", 28);
       } else if (Bot->IsPartition) {
-        CopyMem (Bot->Response + 8, "GBL     PARTITION       0009", 28);
+        CopyMem (Bot->Response + 8, "GBL     PARTITION       0010", 28);
       } else {
-        CopyMem (Bot->Response + 8, "GBL     RAM DISK        0009", 28);
+        CopyMem (Bot->Response + 8, "GBL     RAM DISK        0010", 28);
       }
       Length = 36;
     } else {
