@@ -461,10 +461,16 @@ def cmd_info(dev):
 
 
 def _mode_sense(fd, ten, page, pc=0, dbd=1):
+    # Ask for the whole allocation. MODE SENSE(6) can return up to 255 bytes and
+    # MODE SENSE(10) more; the full page set (header + block descriptor + pages
+    # 0x01/0x08/0x0a/0x1c, plus 0x2a on an optical LUN) is 64 and 80 bytes, so a
+    # 63/60-byte request would truncate it and parse as a short read.
     if ten:
-        status, sb, data, _ = sg_io(fd, cdb_mode_sense10(page, pc, dbd), 0x3C, SG_DXFER_FROM_DEV)
+        status, sb, data, _ = sg_io(fd, cdb_mode_sense10(page, pc, dbd, 0x0100),
+                                    0x0100, SG_DXFER_FROM_DEV)
     else:
-        status, sb, data, _ = sg_io(fd, cdb_mode_sense6(page, pc, dbd), 0x3F, SG_DXFER_FROM_DEV)
+        status, sb, data, _ = sg_io(fd, cdb_mode_sense6(page, pc, dbd, 0xFF),
+                                    0xFF, SG_DXFER_FROM_DEV)
     if status != 0:
         return None, sb, b""
     try:
@@ -1077,6 +1083,25 @@ def cmd_self_test():
     parsed = parse_mode_sense(bytes(body2), False)
     assert parsed["pages"] == "01,08,0a,1c", parsed["pages"]
     assert parsed["recovery_page_length"] == 10 and parsed["informational_page_length"] == 8
+    # A 64-byte reply (header + 8-byte block descriptor + the four pages) must
+    # parse when the declared length exactly fills the buffer; a narrower
+    # allocation would truncate it and look like a short read.
+    body3 = bytearray(4 + 8 + 12 + 20 + 10 + 10)
+    body3[2] = 0x80
+    body3[3] = 8
+    body3[5:8] = (2048).to_bytes(3, "big")
+    body3[9:12] = (512).to_bytes(3, "big")
+    cursor = 4 + 8
+    for code, size in ((0x01, 10), (0x08, 18), (0x0A, 8), (0x1C, 8)):
+        body3[cursor] = code
+        body3[cursor + 1] = size
+        cursor += 2 + size
+    body3[0] = len(body3) - 1
+    assert cursor == len(body3)
+    parsed3 = parse_mode_sense(bytes(body3), False)
+    assert parsed3["block_descriptor_length"] == 8, parsed3["block_descriptor_length"]
+    assert parsed3["block_count"] == 2048 and parsed3["logical_block_length"] == 512
+    assert parsed3["pages"] == "01,08,0a,1c", parsed3["pages"]
 
     self_test_sgio_header()
     self_test_modesense_flow()
