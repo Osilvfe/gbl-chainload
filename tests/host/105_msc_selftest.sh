@@ -162,8 +162,8 @@ case "$cmd" in
       echo "mode6_capabilities.status=check_condition"
       echo "mode6_capabilities.sense=5/0x24"
     fi
-    echo "mode6.recovery_page_length=12"
-    echo "mode6.informational_page_length=10"
+    echo "mode6.recovery_page_length=10"
+    echo "mode6.informational_page_length=8"
     echo "mode6.status=ok"
     if [ "$model" = "RAM DISK" ] && [ "${MSC_STUB_RAM_WRITABLE:-0}" = "1" ]; then
       echo "mode6.wp=0"
@@ -337,8 +337,8 @@ grep -q "PASS  ram/RAM DISK content unchanged after a refused write" "$work/run.
 grep -q "PASS  ram/RAM DISK MODE SENSE pages 01,08,0a,1c" "$work/run.log"
 grep -q "PASS  ram/RAM DISK WRITE(10) refused" "$work/run.log"
 grep -q "PASS  ram/RAM DISK WRITE(16) refused" "$work/run.log"
-grep -q "PASS  file/FILE IMAGE MODE SENSE page 0x01 length 12" "$work/run.log"
-grep -q "PASS  file/FILE IMAGE MODE SENSE page 0x1c length 10" "$work/run.log"
+grep -q "PASS  file/FILE IMAGE MODE SENSE page 0x01 length field 10" "$work/run.log"
+grep -q "PASS  file/FILE IMAGE MODE SENSE page 0x1c length field 8" "$work/run.log"
 grep -q "PASS  file/FILE IMAGE MODE SELECT(6) current values accepted" "$work/run.log"
 grep -q "PASS  file/FILE IMAGE MODE SELECT WCE=1 rejected" "$work/run.log"
 grep -q "PASS  ram/RAM DISK MODE SELECT unknown page rejected" "$work/run.log"

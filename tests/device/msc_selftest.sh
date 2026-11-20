@@ -257,10 +257,12 @@ check_page_lengths() { # <modesense-output> <label>
   local out=$1 label=$2 rlen ilen
   rlen=$(printf '%s' "$out" | sed -n 's/^mode6\.recovery_page_length=//p')
   ilen=$(printf '%s' "$out" | sed -n 's/^mode6\.informational_page_length=//p')
-  [ "$rlen" = "12" ] && pass "$label MODE SENSE page 0x01 length 12" \
-    || fail "$label MODE SENSE page 0x01 length ${rlen:-missing} (expected 12)"
-  [ "$ilen" = "10" ] && pass "$label MODE SENSE page 0x1c length 10" \
-    || fail "$label MODE SENSE page 0x1c length ${ilen:-missing} (expected 10)"
+  # The page-length byte excludes the two-byte page header, so a 12-byte
+  # error-recovery page carries 10 and a 10-byte informational page carries 8.
+  [ "$rlen" = "10" ] && pass "$label MODE SENSE page 0x01 length field 10" \
+    || fail "$label MODE SENSE page 0x01 length field ${rlen:-missing} (expected 10)"
+  [ "$ilen" = "8" ] && pass "$label MODE SENSE page 0x1c length field 8" \
+    || fail "$label MODE SENSE page 0x1c length field ${ilen:-missing} (expected 8)"
 }
 
 # MODE SELECT must accept a list that re-states the values in effect and refuse

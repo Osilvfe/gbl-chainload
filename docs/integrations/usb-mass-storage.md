@@ -151,8 +151,8 @@ Linux exposes the writable RAM/`rw:` LUN without a manual `blockdev --setrw`),
 an 8-byte block descriptor with the LUN's density, block count and logical
 block size, and the implemented pages:
 
-- page `0x01` (read/write error recovery): a 12-byte page with every
-  recovery parameter off. The LUNs perform no automatic retry, correction or
+- page `0x01` (read/write error recovery): a 12-byte page (page-length
+  byte 10) with every recovery parameter off. The LUNs perform no automatic retry, correction or
   deferred error handling, so the page exists only so error-recovery-aware
   tools do not treat the LUN as SCSI-1;
 - page `0x08` (caching): write cache disabled (`WCE=0`) and no read cache.
@@ -430,8 +430,9 @@ it to `EFI/GBLMSC/selftest.bin`, for devices where no usable file exists yet.
 The GBL Fastboot phase (`run`) exports that file as `file:` and `iso:`,
 verifies logical block size, read-only flag, padded capacity, content hash,
 INQUIRY type, `MODE SENSE` header/block descriptor/pages (the
-`01,08,0a,1c[,2a]` set with the fixed 12/10-byte lengths of pages `0x01` and
-`0x1c`, `0x2a` present on the CD-ROM LUN and refused on a direct-access one),
+`01,08,0a,1c[,2a]` set with the fixed 12- and 10-byte pages `0x01` and `0x1c`
+(their page-length bytes 10 and 8), `0x2a` present on the CD-ROM LUN and
+refused on a direct-access one),
 `MODE SELECT` (a current-value list accepted, `WCE=1` and an unknown page
 refused `5/0x26`), and the MMC commands with their event-status answer, tries
 a write on each read-only LUN, and ejects back to Fastboot. A `mixed` case
