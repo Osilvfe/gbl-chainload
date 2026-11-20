@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# msc_selftest.sh - automated checks for the read-only ISO/file MSC LUNs and
-#                   the MODE SENSE implementation.
+# msc_selftest.sh - automated checks for the MSC LUNs (ISO/file media, the RAM
+#                   disk, optional writable partitions), MODE SENSE/SELECT and
+#                   the opt-in write backend.
 #
 # Two phases, because the phone has to move between Android and GBL Fastboot:
 #
@@ -65,12 +66,19 @@ usage: tests/device/msc_selftest.sh <command> [options]
           the host devices (logical block size, read-only flag, capacity,
           content hash, write rejection, INQUIRY, MODE SENSE, and MMC
           GET CONFIGURATION / READ TOC for the ISO LUN), then ejects so the
-          phone returns to Fastboot. Cases: file iso mixed ram.
+          phone returns to Fastboot. Cases: file iso mixed ram rw.
 
-          The ram case exports the in-memory LUN and probes WRITE: a read-only
-          build must refuse it with DATA PROTECT, a writable build must accept
-          it, show the bytes on the next read, flush, and leave the medium as
-          it found it.
+          The ram case exports the in-memory LUN and drives the write backend:
+          a read-only build must refuse WRITE with DATA PROTECT and change
+          nothing; a writable build must accept WRITE(6/10/12/16), show the
+          bytes on the next read, survive SYNCHRONIZE CACHE, and restore the
+          medium exactly as found (2-block round-trip).
+
+          The rw case is the only one that writes a real partition: it exports
+          rw:<MSC_RW_PARTITION> and writes and restores the LAST block only. It
+          is opt-in (you must list it in --cases and set MSC_RW_PARTITION) and
+          skips itself unless the LUN reports WP=0. Do not unplug while it
+          runs.
 
   status          Show the test file record and any GBL LUNs visible now.
   volumes         List the vfat volumes Android has mounted, with their
@@ -241,6 +249,40 @@ probe() {
     return 0
   fi
   $SUDO "$PYTHON" "$PROBE" "$@"
+}
+
+# Every LUN now carries the error-recovery (0x01) and informational (0x1c)
+# pages; their lengths are fixed by SPC and by what this firmware emits.
+check_page_lengths() { # <modesense-output> <label>
+  local out=$1 label=$2 rlen ilen
+  rlen=$(printf '%s' "$out" | sed -n 's/^mode6\.recovery_page_length=//p')
+  ilen=$(printf '%s' "$out" | sed -n 's/^mode6\.informational_page_length=//p')
+  [ "$rlen" = "12" ] && pass "$label MODE SENSE page 0x01 length 12" \
+    || fail "$label MODE SENSE page 0x01 length ${rlen:-missing} (expected 12)"
+  [ "$ilen" = "10" ] && pass "$label MODE SENSE page 0x1c length 10" \
+    || fail "$label MODE SENSE page 0x1c length ${ilen:-missing} (expected 10)"
+}
+
+# MODE SELECT must accept a list that re-states the values in effect and refuse
+# a write cache or an unknown page. It is a no-op change, safe on every LUN.
+check_mode_select() { # <dev> <label>
+  local dev=$1 label=$2 out
+  out=$(probe modeselect "$DEV_PREFIX$dev" || true)
+  printf '%s' "$out" | grep -qx "modeselect6.status=ok" \
+    && pass "$label MODE SELECT(6) current values accepted" \
+    || fail "$label MODE SELECT(6) rejected a current-value list"
+  printf '%s' "$out" | grep -qx "modeselect10.status=ok" \
+    && pass "$label MODE SELECT(10) current values accepted" \
+    || fail "$label MODE SELECT(10) rejected a current-value list"
+  printf '%s' "$out" | grep -qx "modeselect_wce.status=check_condition" \
+    && pass "$label MODE SELECT WCE=1 rejected" \
+    || fail "$label MODE SELECT accepted WCE=1"
+  printf '%s' "$out" | grep -qx "modeselect_wce.sense=5/0x26/0x00" \
+    && pass "$label MODE SELECT WCE sense 5/0x26" \
+    || fail "$label MODE SELECT WCE sense $(printf '%s' "$out" | sed -n 's/^modeselect_wce\.sense=//p')"
+  printf '%s' "$out" | grep -qx "modeselect_badpage.status=check_condition" \
+    && pass "$label MODE SELECT unknown page rejected" \
+    || fail "$label MODE SELECT accepted an unknown page"
 }
 
 round_up() { # <value> <multiple>
@@ -473,6 +515,10 @@ verify_file_lun() { # <row> <expected-block-size> <expected-type> <label>
       0007)
         note "product revision 0007: predates the MMC capabilities page (0x2a) and"
         note "GET EVENT STATUS NOTIFICATION (0008); stage a newer EFISP" ;;
+      0008)
+        note "product revision 0008: predates MODE SENSE pages 0x01/0x1c and the"
+        note "opt-in write backend (0009); the page-length checks will fail until"
+        note "a newer EFISP is staged" ;;
     esac
   else
     fail "$label INQUIRY failed: $(printf '%s' "$out" | tr '\n' ' ')"
@@ -503,6 +549,7 @@ verify_file_lun() { # <row> <expected-block-size> <expected-type> <label>
     [ "$ptype" = "5" ] && want_pages=01,08,0a,1c,2a
     [ "$pages" = "$want_pages" ] && pass "$label MODE SENSE pages $pages" \
       || fail "$label MODE SENSE pages ${pages:-none} (expected $want_pages)"
+    check_page_lengths "$out" "$label"
     if [ "$ptype" = "5" ]; then
       printf '%s' "$out" | grep -qx "mode6_capabilities.status=ok" \
         && pass "$label MODE SENSE page 2a capabilities" \
@@ -525,6 +572,7 @@ verify_file_lun() { # <row> <expected-block-size> <expected-type> <label>
   else
     fail "$label MODE SENSE failed: $(printf '%s' "$out" | tr '\n' ' ')"
   fi
+  check_mode_select "$dev" "$label"
 
   if [ "$ptype" = "5" ]; then
     out=$(probe mmc "$DEV_PREFIX$dev" || true)
@@ -619,23 +667,84 @@ verify_ram_lun() { # <row> <label>
   pages=$(printf '%s' "$out" | sed -n 's/^mode6\.pages=//p')
   [ "$pages" = "01,08,0a,1c" ] && pass "$label MODE SENSE pages $pages" \
     || fail "$label MODE SENSE pages ${pages:-none} (expected 01,08,0a,1c)"
+  check_page_lengths "$out" "$label"
   printf '%s' "$out" | grep -qx "mode6_capabilities.status=check_condition" \
     && pass "$label page 2a refused (not an optical LUN)" \
     || fail "$label page 2a accepted on a RAM disk"
+  check_mode_select "$dev" "$label"
 
-  # One block at the very end of the medium: the probe puts the original bytes
-  # back and flushes, so a writable LUN is left exactly as it was found.
-  out=$(probe write "$DEV_PREFIX$dev" || true)
+  # The RAM LUN is the only medium the write backend is exercised on without
+  # touching real storage. The probe writes the last block(s) with every WRITE
+  # opcode, checks the next read, the SYNCHRONIZE CACHE barrier and the restore,
+  # and leaves the medium exactly as it found it. A read-only build refuses the
+  # writes with DATA PROTECT and changes nothing.
+  out=$(probe write "$DEV_PREFIX$dev" 2 || true)
   if printf '%s' "$out" | grep -qx "write.status=refused"; then
     sense=$(printf '%s' "$out" | sed -n 's/^write\.sense=//p')
     [ "$sense" = "7/0x27/0x00" ] && pass "$label write refused (DATA PROTECT)" \
       || fail "$label write refused with sense ${sense:-none} (expected 7/0x27/0x00)"
+    printf '%s' "$out" | grep -qx "write.op10=refused" \
+      && pass "$label WRITE(10) refused" || fail "$label WRITE(10) not refused"
+    printf '%s' "$out" | grep -qx "write.op16=refused" \
+      && pass "$label WRITE(16) refused" || fail "$label WRITE(16) not refused"
     if write_probe "$dev" 512; then
       pass "$label content unchanged after a refused write"
     else
       fail "$label a refused write still changed the content"
     fi
   elif printf '%s' "$out" | grep -qx "write.status=ok"; then
+    pass "$label write accepted (writable LUN)"
+    printf '%s' "$out" | grep -qx "write.blocks=2" \
+      && pass "$label 2-block round-trip" || fail "$label did not exercise 2 blocks"
+    local op ok_ops=0
+    for op in 6 10 12 16; do
+      printf '%s' "$out" | grep -qx "write.op$op=ok" && ok_ops=$((ok_ops + 1))
+    done
+    [ "$ok_ops" = "4" ] && pass "$label WRITE(6/10/12/16) all accepted" \
+      || fail "$label only $ok_ops of 4 WRITE opcodes accepted"
+    printf '%s' "$out" | grep -qx "write.readback=match" \
+      && pass "$label write visible to the next read" || fail "$label write not visible on read back"
+    printf '%s' "$out" | grep -qx "write.sync=ok" \
+      && pass "$label SYNCHRONIZE CACHE" || fail "$label SYNCHRONIZE CACHE failed"
+    printf '%s' "$out" | grep -qx "write.persist=match" \
+      && pass "$label write survives the barrier" || fail "$label write did not survive SYNCHRONIZE CACHE"
+    printf '%s' "$out" | grep -qx "write.restore=ok" \
+      && pass "$label original block restored" || fail "$label could not restore the original block"
+    printf '%s' "$out" | grep -qx "write.restore_sync=ok" \
+      && pass "$label restore flushed" || fail "$label restore flush failed"
+    printf '%s' "$out" | grep -qx "write.restore_verify=match" \
+      && pass "$label restore verified" || fail "$label restored bytes do not match the original"
+  else
+    fail "$label write probe failed: $(printf '%s' "$out" | tr '\n' ' ')"
+  fi
+}
+
+# A writable real partition is the highest-risk path: the probe writes the last
+# block and restores it. It only runs when the operator selects the `rw` case
+# and names the partition, and it bails out unless the LUN actually reports
+# WP=0, proving a write-capable build honoured rw:. Nothing else is touched.
+verify_rw_partition() { # <row> <label>
+  local row=$1 label=$2
+  local dev model lb ro sec out wp
+  dev=$(row_field "$row" 1); model=$(row_field "$row" 2)
+  lb=$(row_field "$row" 3); ro=$(row_field "$row" 4); sec=$(row_field "$row" 5)
+
+  say "-- $label: /dev/$dev (partition LUN, writable requested)"
+  note "WRITABLE PARTITION TEST: writes the LAST block then restores it."
+  note "Keep the phone powered and do not unplug mid-write; no other block is touched."
+
+  out=$(probe modesense "$DEV_PREFIX$dev" || true)
+  wp=$(printf '%s' "$out" | sed -n 's/^mode6\.wp=//p')
+  if [ "$wp" = "1" ]; then
+    skip "$label LUN is write-protected (not a write build, or rw: not honoured); nothing written"
+    return 0
+  fi
+  [ "$wp" = "0" ] && pass "$label WP bit clear (writable build)" \
+    || fail "$label MODE SENSE WP bit ${wp:-missing}"
+  check_mode_select "$dev" "$label"
+
+  out=$(probe write "$DEV_PREFIX$dev" 1 || true)
+  if printf '%s' "$out" | grep -qx "write.status=ok"; then
     printf '%s' "$out" | grep -qx "write.readback=match" \
       && pass "$label write visible to the next read" || fail "$label write not visible on read back"
     printf '%s' "$out" | grep -qx "write.sync=ok" \
@@ -644,6 +753,10 @@ verify_ram_lun() { # <row> <label>
       && pass "$label original block restored" || fail "$label could not restore the original block"
     printf '%s' "$out" | grep -qx "write.restore_sync=ok" \
       && pass "$label restore flushed" || fail "$label restore flush failed"
+    printf '%s' "$out" | grep -qx "write.restore_verify=match" \
+      && pass "$label restore verified" || fail "$label restored bytes do not match the original"
+  elif printf '%s' "$out" | grep -qx "write.status=refused"; then
+    skip "$label write refused despite WP=0 (rw: not honoured); nothing written"
   else
     fail "$label write probe failed: $(printf '%s' "$out" | tr '\n' ' ')"
   fi
@@ -690,12 +803,16 @@ run_case() { # <label> <spec> <expected model:block:type> [<expected model:block
       continue
     fi
     if [ "$model" = "PARTITION" ]; then
-      local dev lb ro
-      dev=$(row_field "$row" 1); lb=$(row_field "$row" 3); ro=$(row_field "$row" 4)
-      say "-- $label: /dev/$dev (partition LUN)"
-      [ "$ro" = "1" ] && pass "$label partition LUN read-only" || fail "$label partition LUN ro=$ro"
-      [ "$lb" -ge 512 ] && pass "$label partition logical block size $lb" \
-        || fail "$label partition logical block size $lb"
+      if [ "$label" = "rw" ]; then
+        verify_rw_partition "$row" "$label"
+      else
+        local dev lb ro
+        dev=$(row_field "$row" 1); lb=$(row_field "$row" 3); ro=$(row_field "$row" 4)
+        say "-- $label: /dev/$dev (partition LUN)"
+        [ "$ro" = "1" ] && pass "$label partition LUN read-only" || fail "$label partition LUN ro=$ro"
+        [ "$lb" -ge 512 ] && pass "$label partition logical block size $lb" \
+          || fail "$label partition logical block size $lb"
+      fi
     elif [ "$model" = "RAM disk" ]; then
       verify_ram_lun "$row" "$label/$model"
     else
@@ -789,6 +906,9 @@ cmd_run() {
       iso)   run_case iso "iso:$MSC_PATH" "ISO IMAGE:2048:5" || true ;;
       mixed) run_case mixed "boot_a,file:$MSC_PATH" "PARTITION:*:0" "FILE IMAGE:512:0" || true ;;
       ram)   run_case ram "ram:" "RAM disk:*:0" || true ;;
+      rw)
+        [ -n "${MSC_RW_PARTITION:-}" ] || die "the rw case writes and restores the LAST block of a real partition; set MSC_RW_PARTITION=<name> (e.g. MSC_RW_PARTITION=userdata) to proceed"
+        run_case rw "rw:$MSC_RW_PARTITION" "PARTITION:*:0" || true ;;
       *) die "unknown case: $case" ;;
     esac
   done

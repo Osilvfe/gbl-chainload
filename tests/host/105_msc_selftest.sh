@@ -96,7 +96,11 @@ case "$1" in
       printf 'GBL     \n' > "$dir/device/vendor"
       printf '%-16s\n' "$model" > "$dir/device/model"
       echo "$block" > "$dir/queue/logical_block_size"
-      echo 1 > "$dir/ro"
+      if [ "$model" = "RAM disk" ] && [ "${MSC_STUB_RAM_WRITABLE:-0}" = "1" ]; then
+        echo 0 > "$dir/ro"
+      else
+        echo 1 > "$dir/ro"
+      fi
       if [ "$model" = "PARTITION" ] || [ "$model" = "RAM disk" ]; then
         head -c $((1024 * 1024)) /dev/zero > "$DEVDIR/$name"
       else
@@ -109,7 +113,11 @@ case "$1" in
         fi
       fi
       echo $(( $(stat -c %s "$DEVDIR/$name") / 512 )) > "$dir/size"
-      chmod 444 "$DEVDIR/$name"   # a read-only block device rejects writes
+      if [ "$model" = "RAM disk" ] && [ "${MSC_STUB_RAM_WRITABLE:-0}" = "1" ]; then
+        chmod 644 "$DEVDIR/$name"   # a writable LUN accepts writes
+      else
+        chmod 444 "$DEVDIR/$name"   # a read-only block device rejects writes
+      fi
       idx=$((idx + 1))
     done
     echo "gbl" > /dev/null
@@ -154,8 +162,14 @@ case "$cmd" in
       echo "mode6_capabilities.status=check_condition"
       echo "mode6_capabilities.sense=5/0x24"
     fi
+    echo "mode6.recovery_page_length=12"
+    echo "mode6.informational_page_length=10"
     echo "mode6.status=ok"
-    echo "mode6.wp=${MSC_STUB_WP:-1}"
+    if [ "$model" = "RAM disk" ] && [ "${MSC_STUB_RAM_WRITABLE:-0}" = "1" ]; then
+      echo "mode6.wp=0"
+    else
+      echo "mode6.wp=${MSC_STUB_WP:-1}"
+    fi
     echo "mode6.block_descriptor_length=0"
     echo "mode6.block_count=0"
     echo "mode6.logical_block_length=0"
@@ -187,13 +201,40 @@ case "$cmd" in
       echo "event.supported_classes=0x10"
     fi
     echo "handle=stub" ;;
+  modeselect)
+    # A current-value list is accepted; WCE=1 and an unknown page are refused.
+    echo "modeselect6.status=ok"
+    echo "modeselect10.status=ok"
+    echo "modeselect_wce.status=check_condition"
+    echo "modeselect_wce.sense=5/0x26/0x00"
+    echo "modeselect_badpage.status=check_condition"
+    echo "handle=stub" ;;
   write)
-    # A read-only build refuses the block with DATA PROTECT and changes
-    # nothing; the stub never claims a writable LUN.
     echo "write.last_lba=2047"
     echo "write.block_size=$block"
-    echo "write.status=refused"
-    echo "write.sense=7/0x27/0x00"
+    echo "write.blocks=2"
+    if [ "$model" = "RAM disk" ] && [ "${MSC_STUB_RAM_WRITABLE:-0}" = "1" ]; then
+      echo "write.op6=ok"
+      echo "write.op10=ok"
+      echo "write.op12=ok"
+      echo "write.op16=ok"
+      echo "write.status=ok"
+      echo "write.readback=match"
+      echo "write.sync=ok"
+      echo "write.persist=match"
+      echo "write.restore=ok"
+      echo "write.restore_sync=ok"
+      echo "write.restore_verify=match"
+    else
+      # A read-only build refuses every WRITE opcode with DATA PROTECT and
+      # changes nothing; the stub never claims a writable LUN.
+      echo "write.op6=refused"
+      echo "write.op10=refused"
+      echo "write.op12=refused"
+      echo "write.op16=refused"
+      echo "write.status=refused"
+      echo "write.sense=7/0x27/0x00"
+    fi
     echo "handle=stub" ;;
   openrw)
     echo "openrw=refused_erofs" ;;
@@ -294,6 +335,13 @@ grep -q "PASS  file/FILE IMAGE MODE SENSE page 2a rejected on a direct-access LU
 grep -q "PASS  ram/RAM disk write refused (DATA PROTECT)" "$work/run.log"
 grep -q "PASS  ram/RAM disk content unchanged after a refused write" "$work/run.log"
 grep -q "PASS  ram/RAM disk MODE SENSE pages 01,08,0a,1c" "$work/run.log"
+grep -q "PASS  ram/RAM disk WRITE(10) refused" "$work/run.log"
+grep -q "PASS  ram/RAM disk WRITE(16) refused" "$work/run.log"
+grep -q "PASS  file/FILE IMAGE MODE SENSE page 0x01 length 12" "$work/run.log"
+grep -q "PASS  file/FILE IMAGE MODE SENSE page 0x1c length 10" "$work/run.log"
+grep -q "PASS  file/FILE IMAGE MODE SELECT(6) current values accepted" "$work/run.log"
+grep -q "PASS  file/FILE IMAGE MODE SELECT WCE=1 rejected" "$work/run.log"
+grep -q "PASS  ram/RAM disk MODE SELECT unknown page rejected" "$work/run.log"
 grep -q "PASS  iso/ISO IMAGE GET EVENT STATUS NOTIFICATION" "$work/run.log"
 grep -q "PASS  iso/ISO IMAGE no media event pending (NEA)" "$work/run.log"
 grep -q "PASS  iso/ISO IMAGE media event class advertised" "$work/run.log"
@@ -302,6 +350,17 @@ grep -q "PASS  mixed returned to GBL Fastboot" "$work/run.log"
 [ "$(sed -n '1p' "$work/log")" = "file:/EFI/BOOT/BOOTAA64.EFI" ]
 [ "$(sed -n '2p' "$work/log")" = "iso:/EFI/BOOT/BOOTAA64.EFI" ]
 [ "$(sed -n '3p' "$work/log")" = "boot_a,file:/EFI/BOOT/BOOTAA64.EFI" ]
+
+echo "== run (a writable RAM LUN exercises the write backend) =="
+MSC_STUB_RAM_WRITABLE=1 run_selftest bash "$script" run --cases ram >"$work/ramw.log" 2>&1 || { cat "$work/ramw.log"; exit 1; }
+grep -q 'checks passed: .*failed: 0' "$work/ramw.log"
+grep -q "PASS  ram/RAM disk write accepted (writable LUN)" "$work/ramw.log"
+grep -q "PASS  ram/RAM disk 2-block round-trip" "$work/ramw.log"
+grep -q "PASS  ram/RAM disk WRITE(6/10/12/16) all accepted" "$work/ramw.log"
+grep -q "PASS  ram/RAM disk write visible to the next read" "$work/ramw.log"
+grep -q "PASS  ram/RAM disk SYNCHRONIZE CACHE" "$work/ramw.log"
+grep -q "PASS  ram/RAM disk write survives the barrier" "$work/ramw.log"
+grep -q "PASS  ram/RAM disk restore verified" "$work/ramw.log"
 
 echo "== run (tampered content must fail) =="
 MSC_STUB_TAMPER=1 run_selftest bash "$script" run --cases file >"$work/tamper.log" && exit 1 || true
@@ -362,6 +421,11 @@ echo m >"$work/mode"
 MSC_TEST_IMAGE="$written" run_selftest bash "$script" run --cases file >/dev/null 2>"$work/nofb.log" && exit 1 || true
 grep -q 'no GBL Fastboot interface is answering' "$work/nofb.log"
 echo gbl >"$work/mode"
+
+echo "== the rw case refuses to run without a named partition =="
+echo gbl >"$work/mode"
+run_selftest bash "$script" run --cases rw >/dev/null 2>"$work/rw-noenv.log" && exit 1 || true
+grep -q 'set MSC_RW_PARTITION=' "$work/rw-noenv.log"
 
 echo "== list-disks =="
 run_selftest bash "$script" run --cases file --keep >/dev/null || true

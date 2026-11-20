@@ -7,6 +7,8 @@ grep/compare without extra tooling.
     info <dev>        INQUIRY + READ CAPACITY(10)
     modesense <dev>   MODE SENSE(6)/(10), page 0x3f and the negative cases
     mmc <dev>         GET CONFIGURATION + READ TOC (CD-ROM LUN)
+    modeselect <dev>  MODE SELECT(6)/(10): current values, WCE and bad page
+    write <dev> [n]   write the last n blocks (default 1), sync and restore
     eject <dev>       PREVENT ALLOW(0) + START STOP UNIT(LoEj=1)
     openrw <dev>      report whether an O_RDWR open is refused
     self-test         offline checks of the CDB builders and parsers
@@ -106,6 +108,65 @@ def cdb_write10(lba=0, blocks=1):
 
 def cdb_sync_cache10():
     return bytes([0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+def cdb_write6(lba=0, blocks=1):
+    if not 1 <= blocks <= 256:
+        raise ValueError("WRITE(6) supports 1..256 blocks")
+    lba &= 0x1FFFFF
+    n = 0 if blocks == 256 else blocks
+    return bytes([0x0A, (lba >> 16) & 0x1F, (lba >> 8) & 0xFF, lba & 0xFF, n, 0])
+
+
+def cdb_write12(lba=0, blocks=1):
+    return bytes([0xAA, 0, (lba >> 24) & 0xFF, (lba >> 16) & 0xFF,
+                  (lba >> 8) & 0xFF, lba & 0xFF, 0,
+                  (blocks >> 24) & 0xFF, (blocks >> 16) & 0xFF,
+                  (blocks >> 8) & 0xFF, blocks & 0xFF, 0])
+
+
+def cdb_write16(lba=0, blocks=1):
+    return bytes([0x8A, 0,
+                  (lba >> 56) & 0xFF, (lba >> 48) & 0xFF, (lba >> 40) & 0xFF,
+                  (lba >> 32) & 0xFF, (lba >> 24) & 0xFF, (lba >> 16) & 0xFF,
+                  (lba >> 8) & 0xFF, lba & 0xFF,
+                  (blocks >> 24) & 0xFF, (blocks >> 16) & 0xFF,
+                  (blocks >> 8) & 0xFF, blocks & 0xFF, 0, 0])
+
+
+def cdb_mode_select6(parameter_length):
+    return bytes([0x15, 0x00, 0, 0, parameter_length & 0xFF, 0])
+
+
+def cdb_mode_select10(parameter_length):
+    return bytes([0x55, 0, 0, 0, 0, 0, 0,
+                  (parameter_length >> 8) & 0xFF, parameter_length & 0xFF, 0])
+
+
+def mode_select_list(page, ten=False):
+    """Build a well-formed MODE SELECT parameter list holding one page.
+
+    Page 0x08 with a zero first body byte asks for the write cache already in
+    effect (WCE=0); the block descriptor length is zero because the host does
+    not re-declare the geometry. ``page`` is the full page bytes (code, length,
+    body)."""
+    if ten:
+        header = bytearray(8)
+        total = 8 + len(page)
+        header[0] = (total - 2) >> 8
+        header[1] = (total - 2) & 0xFF
+    else:
+        header = bytearray(4)
+        header[0] = (4 + len(page) - 1) & 0xFF
+    return bytes(header) + bytes(page)
+
+
+def caching_page(wce=0, length=18):
+    body = bytearray(2 + length)
+    body[0] = 0x08
+    body[1] = length
+    if wce:
+        body[2] |= 0x04
+    return bytes(body)
+
 
 
 def cdb_get_event_status_notification(rt=1, alloc=0x10):
@@ -190,6 +251,10 @@ def parse_mode_sense(data, ten):
         if page == 0x0A:
             result["control_gltsd"] = (body[0] >> 2) & 1 if len(body) > 0 else -1
             result["control_dsense"] = (body[0] >> 3) & 1 if len(body) > 0 else -1
+        if page == 0x01:
+            result["recovery_page_length"] = size
+        if page == 0x1C:
+            result["informational_page_length"] = size
         if page == 0x2A:
             result["capabilities_page_length"] = size
         offset += 2 + size
@@ -564,15 +629,76 @@ def cmd_mmc(dev):
     return 1 if failures else 0
 
 
-def cmd_write(dev):
-    """Try to write one block, then put the original bytes back.
+def cmd_modeselect(dev):
+    """MODE SELECT(6)/(10) as the device enforces it.
 
-    The target block is the last block of the medium, so a writable LUN's
-    filesystem metadata is untouched, and the original content is restored
-    before the command returns. A read-only LUN answers DATA PROTECT and
-    nothing is written: that is reported as ``write.status=refused`` with the
-    sense data, not as a failure of the probe itself.
+    A parameter list that re-states the values already in effect (page 0x08
+    with WCE=0) is accepted and changes nothing. Asking for a write cache
+    (WCE=1) or naming an unknown page is INVALID FIELD IN PARAMETER LIST: the
+    device never accepts a policy it cannot honour.
     """
+    fd, how = open_scsi(dev)
+    failures = 0
+    try:
+        current6 = mode_select_list(caching_page(0), ten=False)
+        current10 = mode_select_list(caching_page(0), ten=True)
+        wce = mode_select_list(caching_page(1), ten=False)
+        unknown = mode_select_list(bytes([0x02, 0x02, 0x00, 0x00]), ten=False)
+        cases = (
+            ("modeselect6", cdb_mode_select6(len(current6)), current6, True),
+            ("modeselect10", cdb_mode_select10(len(current10)), current10, True),
+            ("modeselect_wce", cdb_mode_select6(len(wce)), wce, False),
+            ("modeselect_badpage", cdb_mode_select6(len(unknown)), unknown, False),
+        )
+        for tag, cdb, lst, expect_ok in cases:
+            status, sb, _, _ = sg_io(fd, cdb, len(lst), SG_DXFER_TO_DEV, payload=lst)
+            key, asc, ascq = sense_summary(sb) or (-1, -1, -1)
+            if status == 0:
+                print("%s.status=ok" % tag)
+                if not expect_ok:
+                    failures += 1
+            else:
+                print("%s.status=check_condition" % tag)
+                print("%s.sense=%d/0x%02x/0x%02x" % (tag, key, asc & 0xFF, ascq & 0xFF))
+                if expect_ok:
+                    failures += 1
+        print("handle=%s" % how)
+    finally:
+        os.close(fd)
+    return 1 if failures else 0
+
+
+def _pattern(size, seed):
+    return bytes(((i * 37 + seed) & 0xFF) for i in range(size))
+
+
+def cmd_write(dev, rest=None):
+    """Exercise the write path, then put the original bytes back.
+
+    The target range ends at the last block of the medium, so a writable LUN's
+    filesystem metadata is untouched and the original content is restored
+    before the command returns. The probe covers, in order:
+
+      1. each WRITE(6/10/12/16) opcode on the last block, so a writable LUN is
+         shown to accept every CDB size and a read-only LUN to refuse them all
+         with DATA PROTECT;
+      2. a multi-block pattern written with WRITE(10), read straight back;
+      3. SYNCHRONIZE CACHE and a re-read (the bytes survive the barrier);
+      4. the original bytes written back, flushed, and verified.
+
+    A read-only LUN answers DATA PROTECT and nothing is written: that is
+    reported as ``write.status=refused`` with the sense data, not as a failure
+    of the probe itself. ``write <dev> [blocks]`` widens the round-trip to up
+    to 8 blocks (default 1).
+    """
+    rest = rest or []
+    try:
+        want_blocks = int(rest[0]) if rest else 1
+    except ValueError:
+        print("write.status=error")
+        print("error=blocks must be an integer", file=sys.stderr)
+        return 1
+    want_blocks = max(1, want_blocks)
     fd, how = open_scsi(dev)
     failures = 0
     try:
@@ -584,41 +710,106 @@ def cmd_write(dev):
             return 1
         last_lba = int.from_bytes(data[0:4], "big")
         block = int.from_bytes(data[4:8], "big")
+        blocks = min(want_blocks, last_lba + 1, 8)
+        first_lba = last_lba - blocks + 1
         print("write.last_lba=%d" % last_lba)
         print("write.block_size=%d" % block)
-        status, sb, original, _ = sg_io(fd, cdb_read10(last_lba, 1), block, SG_DXFER_FROM_DEV)
-        if status != 0 or len(original) != block:
+        print("write.blocks=%d" % blocks)
+        status, sb, original, _ = sg_io(fd, cdb_read10(first_lba, blocks), block * blocks,
+                                        SG_DXFER_FROM_DEV)
+        if status != 0 or len(original) != block * blocks:
             key, asc, _ = sense_summary(sb) or (-1, -1, -1)
             print("write.status=check_condition")
             print("write.sense=%d/0x%02x" % (key, asc & 0xFF))
             return 1
-        pattern = bytes(((i * 37 + 11) & 0xFF) for i in range(block))
-        status, sb, _, _ = sg_io(fd, cdb_write10(last_lba, 1), block, SG_DXFER_TO_DEV,
-                                 payload=pattern)
-        key, asc, ascq = sense_summary(sb) or (-1, -1, -1)
-        if status != 0:
+
+        # 1) Every WRITE opcode size on the single last block.
+        opcodes = ((6, cdb_write6), (10, cdb_write10), (12, cdb_write12), (16, cdb_write16))
+        refused = 0
+        tested = 0
+        first_refused = None
+        for size, cdb in opcodes:
+            tag = "write.op%d" % size
+            if size == 6 and last_lba > 0x1FFFFF:
+                print("%s=skip" % tag)
+                continue
+            tested += 1
+            pat = _pattern(block, size)
+            status, sb, _, _ = sg_io(fd, cdb(last_lba, 1), block, SG_DXFER_TO_DEV, payload=pat)
+            if status != 0:
+                key, asc, ascq = sense_summary(sb) or (-1, -1, -1)
+                print("%s=refused" % tag)
+                print("%s_sense=%d/0x%02x/0x%02x" % (tag, key, asc & 0xFF, ascq & 0xFF))
+                refused += 1
+                if first_refused is None:
+                    first_refused = (key, asc, ascq)
+                continue
+            status2, sb2, back, _ = sg_io(fd, cdb_read10(last_lba, 1), block, SG_DXFER_FROM_DEV)
+            ok = status2 == 0 and back == pat
+            print("%s=%s" % (tag, "ok" if ok else "mismatch"))
+            if not ok:
+                failures += 1
+
+        if tested != 0 and refused == tested:
+            # Read-only LUN: every write was refused, the medium is intact.
+            key, asc, ascq = first_refused or (-1, -1, -1)
             print("write.status=refused")
             print("write.sense=%d/0x%02x/0x%02x" % (key, asc & 0xFF, ascq & 0xFF))
             transport_facts("write", b"")
-            return 0
-        print("write.status=ok")
-        status, sb, after, _ = sg_io(fd, cdb_read10(last_lba, 1), block, SG_DXFER_FROM_DEV)
-        print("write.readback=%s" % ("match" if status == 0 and after == pattern else "mismatch"))
-        if status != 0 or after != pattern:
+            print("handle=%s" % how)
+            return 1 if failures else 0
+        if refused:
+            # Some opcodes accepted, others refused: a consistency bug.
+            print("write.status=partial")
             failures += 1
+            return 1
+
+        # 2) Multi-block pattern round-trip with WRITE(10).
+        size = block * blocks
+        pat = _pattern(size, 1)
+        status, sb, _, _ = sg_io(fd, cdb_write10(first_lba, blocks), size, SG_DXFER_TO_DEV,
+                                 payload=pat)
+        print("write.status=%s" % ("ok" if status == 0 else "check_condition"))
+        if status != 0:
+            key, asc, _ = sense_summary(sb) or (-1, -1, -1)
+            print("write.sense=%d/0x%02x" % (key, asc & 0xFF))
+            return 1
+
+        def readback() -> bytes:
+            st, sbx, out, _ = sg_io(fd, cdb_read10(first_lba, blocks), size, SG_DXFER_FROM_DEV)
+            return out if st == 0 else b""
+
+        back = readback()
+        print("write.readback=%s" % ("match" if back == pat else "mismatch"))
+        if back != pat:
+            failures += 1
+
+        # 3) The barrier, then confirm the bytes are still there.
         status, sb, _, _ = sg_io(fd, cdb_sync_cache10(), 0, SG_DXFER_NONE)
-        key, asc, _ = sense_summary(sb) or (-1, -1, -1)
         print("write.sync=%s" % ("ok" if status == 0 else "check_condition"))
         if status != 0:
+            key, asc, _ = sense_summary(sb) or (-1, -1, -1)
             print("write.sync_sense=%d/0x%02x" % (key, asc & 0xFF))
             failures += 1
-        status, sb, _, _ = sg_io(fd, cdb_write10(last_lba, 1), block, SG_DXFER_TO_DEV,
+        back = readback()
+        print("write.persist=%s" % ("match" if back == pat else "mismatch"))
+        if back != pat:
+            failures += 1
+
+        # 4) Restore the original bytes and verify the restore stuck.
+        status, sb, _, _ = sg_io(fd, cdb_write10(first_lba, blocks), size, SG_DXFER_TO_DEV,
                                  payload=original)
         print("write.restore=%s" % ("ok" if status == 0 else "check_condition"))
         if status != 0:
             failures += 1
         status, sb, _, _ = sg_io(fd, cdb_sync_cache10(), 0, SG_DXFER_NONE)
         print("write.restore_sync=%s" % ("ok" if status == 0 else "check_condition"))
+        if status != 0:
+            failures += 1
+        back = readback()
+        print("write.restore_verify=%s" % ("match" if back == original else "mismatch"))
+        if back != original:
+            failures += 1
         print("handle=%s" % how)
     finally:
         os.close(fd)
@@ -860,6 +1051,33 @@ def cmd_self_test():
     parsed = parse_toc(bytes(toc))
     assert parsed["first_track"] == 1 and parsed["last_track"] == 1
     assert parsed["tracks"][0]["number"] == 1 and parsed["tracks"][0]["address"] == 0
+    # CDB builders for the write and parameter-list paths.
+    assert cdb_write6(0x0123, 9) == bytes([0x0A, 0x00, 0x01, 0x23, 9, 0])
+    assert cdb_write6(0, 256)[4] == 0                    # 256 blocks encodes as 0
+    assert cdb_write12(0x01020304, 0x0102) == bytes([0xAA, 0, 1, 2, 3, 4, 0, 0, 0, 1, 2, 0])
+    w16 = cdb_write16(0x1122334455667788, 0x00000003)
+    assert w16[0] == 0x8A
+    assert w16[2:10] == bytes([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88])
+    assert w16[10:14] == bytes([0, 0, 0, 3])
+    assert cdb_mode_select6(24) == bytes([0x15, 0, 0, 0, 24, 0])
+    assert cdb_mode_select10(24) == bytes([0x55, 0, 0, 0, 0, 0, 0, 0x00, 24, 0])
+    lst = mode_select_list(caching_page(0), ten=False)
+    assert lst[0] == len(lst) - 1 and lst[3] == 0 and lst[4] == 0x08 and lst[5] == 18
+    lst10 = mode_select_list(caching_page(0), ten=True)
+    assert len(lst10) == 8 + 20 and lst10[6:8] == bytes([0, 0]) and lst10[8] == 0x08
+    assert caching_page(1)[2] & 0x04 == 0x04 and caching_page(0)[2] & 0x04 == 0x00
+    # Page lengths for the error-recovery (0x01) and informational (0x1c) pages
+    # must be parsed out so a self-test run can assert them.
+    hdr = bytearray(4)
+    hdr[2] = 0x80
+    pages = (bytes([0x01, 10]) + bytes(10) + bytes([0x08, 18]) + bytes(18)
+             + bytes([0x0A, 8, 0x04]) + bytes(7) + bytes([0x1C, 8]) + bytes(8))
+    body2 = hdr + pages
+    body2[0] = (len(body2) - 1) & 0xFF
+    parsed = parse_mode_sense(bytes(body2), False)
+    assert parsed["pages"] == "01,08,0a,1c", parsed["pages"]
+    assert parsed["recovery_page_length"] == 10 and parsed["informational_page_length"] == 8
+
     self_test_sgio_header()
     self_test_modesense_flow()
     print("self-test=ok")
@@ -881,6 +1099,7 @@ def main(argv):
         "info": cmd_info,
         "modesense": cmd_modesense,
         "mmc": cmd_mmc,
+        "modeselect": cmd_modeselect,
         "write": cmd_write,
         "eject": cmd_eject,
         "openrw": cmd_openrw,
@@ -889,6 +1108,8 @@ def main(argv):
         print("unknown command: %s" % command, file=sys.stderr)
         return 2
     try:
+        if command == "write":
+            return cmd_write(dev, argv[3:]) or 0
         return handlers[command](dev) or 0
     except ProbeError as exc:
         print("error=%s" % exc, file=sys.stderr)
