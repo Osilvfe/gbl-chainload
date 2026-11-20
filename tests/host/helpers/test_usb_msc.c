@@ -212,6 +212,7 @@ STATIC UINTN mFlashLength;
 STATIC UINTN mBlockWrites;
 STATIC UINTN mBlockFlushes;
 STATIC EFI_STATUS mBlockWriteStatus;
+STATIC EFI_STATUS mBlockFlushStatus;
 
 STATIC EFI_STATUS EFIAPI ReadBlocks (EFI_BLOCK_IO_PROTOCOL *BlockIo, UINT32 MediaId,
                                      EFI_LBA Lba, UINTN Size, VOID *Buffer) {
@@ -255,7 +256,7 @@ STATIC EFI_STATUS EFIAPI ResetBlock (EFI_BLOCK_IO_PROTOCOL *BlockIo, BOOLEAN Ext
 STATIC EFI_STATUS EFIAPI FlushBlock (EFI_BLOCK_IO_PROTOCOL *BlockIo) {
   (VOID)BlockIo;
   mBlockFlushes++;
-  return EFI_SUCCESS;
+  return mBlockFlushStatus;
 }
 
 STATIC VOID SetPartition (UINTN Index, CONST CHAR8 *Name, UINT32 BlockSize, UINT64 Size) {
@@ -800,6 +801,7 @@ STATIC VOID ResetMocks (VOID) {
   mBlockWrites = 0;
   mBlockFlushes = 0;
   mBlockWriteStatus = EFI_SUCCESS;
+  mBlockFlushStatus = EFI_SUCCESS;
   mFlashLength = 0;
   memset (mFlash, 0, sizeof (mFlash));
   mUnlocked = TRUE;
@@ -1990,6 +1992,78 @@ STATIC VOID WriteBackendTests (VOID) {
     assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 1024);
     assert (GblMscBotRead (&Bot, 0, Data, 1024) == EFI_SUCCESS);
     assert (memcmp (Data, Payload, 1024) == 0);
+    /* WRITE(6)/(12)/(16) read the LBA and count from different CDB offsets;
+     * one block each, read back to prove it landed where the CDB said. */
+    for (Index = 0; Index < 512; Index++) {
+      Payload[Index] = (UINT8)(Index ^ 0x5a);
+    }
+    MakeCbw (Cbw, 0x0a, 6, 512, FALSE);      /* WRITE(6), LBA 4, 1 block */
+    Cbw[18] = 4;
+    Cbw[19] = 1;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+    assert (Bot.Status == 0 && Bot.ToDisk && Bot.OutLength == 512);
+    assert (GblMscBotWrite (&Bot, 0, Payload, 512) == EFI_SUCCESS);
+    MakeCbw (Cbw, 0xaa, 12, 512, FALSE);     /* WRITE(12), LBA 5, 1 block */
+    Cbw[20] = 5;
+    Cbw[24] = 1;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+    assert (Bot.Status == 0 && Bot.ToDisk && Bot.OutLength == 512);
+    assert (GblMscBotWrite (&Bot, 0, Payload, 512) == EFI_SUCCESS);
+    MakeCbw (Cbw, 0x8a, 16, 512, FALSE);     /* WRITE(16), LBA 6, 1 block */
+    Cbw[24] = 6;
+    Cbw[28] = 1;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+    assert (Bot.Status == 0 && Bot.ToDisk && Bot.OutLength == 512);
+    assert (GblMscBotWrite (&Bot, 0, Payload, 512) == EFI_SUCCESS);
+    for (Index = 4; Index <= 6; Index++) {
+      MakeCbw (Cbw, 0x28, 10, 512, TRUE);
+      Cbw[20] = (UINT8)Index;
+      Cbw[23] = 1;
+      assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.InLength == 512);
+      assert (GblMscBotRead (&Bot, 0, Data, 512) == EFI_SUCCESS);
+      assert (memcmp (Data, Payload, 512) == 0);
+    }
+    /* WRITE(6) with a block count of 0 means 256 blocks (SBC), not "no
+     * data"; the declared transfer follows that expansion. */
+    MakeCbw (Cbw, 0x0a, 6, 512 * 256, FALSE);
+    Cbw[19] = 0;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+    assert (Bot.Status == 0 && Bot.ToDisk && Bot.OutLength == 512U * 256U);
+    /* The expansion is range-checked, never wrapped: 256 blocks do not fit a
+     * 64 KiB LUN, so the write is refused before any data stage. */
+    {
+      GBL_MSC_MEDIA Small;
+      assert (GblMscMediaOpen ("ram:64", &Small) == EFI_SUCCESS);
+      GblMscBotInitMedia (&Bot, &Small);
+      MakeCbw (Cbw, 0x0a, 6, 512 * 256, FALSE);
+      Cbw[19] = 0;
+      assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+      assert (Bot.Status == 1 && Bot.SenseKey == 5 && Bot.Asc == 0x21 && !Bot.ToDisk);
+      GblMscMediaClose (&Small);
+      GblMscBotInitMedia (&Bot, &Media);
+    }
+    /* A write that covers part of a block patches only those bytes. */
+    MakeCbw (Cbw, 0x28, 10, 512, TRUE);
+    Cbw[20] = 9;
+    Cbw[23] = 1;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+    assert (GblMscBotRead (&Bot, 0, Data + 512, 512) == EFI_SUCCESS);
+    memset (Payload, 0xc3, 100);
+    MakeCbw (Cbw, 0x2a, 10, 512, FALSE);
+    Cbw[20] = 9;
+    Cbw[23] = 1;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.OutLength == 512);
+    assert (GblMscBotWrite (&Bot, 100, Payload, 100) == EFI_SUCCESS);
+    MakeCbw (Cbw, 0x28, 10, 512, TRUE);
+    Cbw[20] = 9;
+    Cbw[23] = 1;
+    assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+    assert (GblMscBotRead (&Bot, 0, Data, 512) == EFI_SUCCESS);
+    assert (memcmp (Data, Data + 512, 100) == 0);
+    for (Index = 0; Index < 100; Index++) {
+      assert (Data[100 + Index] == 0xc3);
+    }
+    assert (memcmp (Data + 200, Data + 512 + 200, 312) == 0);
     /* SYNCHRONIZE CACHE is a barrier and clears the dirty flag. */
     MakeCbw (Cbw, 0x35, 10, 0, FALSE);
     assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0 && !Bot.Dirty);
@@ -2079,6 +2153,67 @@ STATIC VOID WriteBackendTests (VOID) {
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
   assert (GblMscBotWrite (&Bot, 0, Payload, 100) == EFI_SUCCESS);
   assert (mBlockWrites == 2 && mBlockReads >= 2);
+  /* A write that starts inside a block patches only its own bytes: the head
+   * and tail of that block keep their old value. */
+  MakeCbw (Cbw, 0x28, 10, 512, TRUE);
+  Cbw[20] = 9;
+  Cbw[23] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotRead (&Bot, 0, Data + 512, 512) == EFI_SUCCESS);
+  memset (Payload, 0x77, 100);
+  MakeCbw (Cbw, 0x2a, 10, 512, FALSE);
+  Cbw[20] = 9;
+  Cbw[23] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotWrite (&Bot, 100, Payload, 100) == EFI_SUCCESS);
+  assert (mBlockWrites == 3);
+  MakeCbw (Cbw, 0x28, 10, 512, TRUE);
+  Cbw[20] = 9;
+  Cbw[23] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotRead (&Bot, 0, Data, 512) == EFI_SUCCESS);
+  assert (memcmp (Data, Data + 512, 100) == 0);
+  for (Index = 0; Index < 100; Index++) {
+    assert (Data[100 + Index] == 0x77);
+  }
+  assert (memcmp (Data + 200, Data + 512 + 200, 312) == 0);
+  /* A write that crosses a block boundary read-modify-writes both blocks. */
+  MakeCbw (Cbw, 0x28, 10, 1024, TRUE);
+  Cbw[20] = 10;
+  Cbw[23] = 2;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotRead (&Bot, 0, Payload, 1024) == EFI_SUCCESS);
+  memset (Data, 0x99, 200);
+  MakeCbw (Cbw, 0x2a, 10, 1024, FALSE);
+  Cbw[20] = 10;
+  Cbw[23] = 2;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotWrite (&Bot, 400, Data, 200) == EFI_SUCCESS);
+  assert (mBlockWrites == 5);
+  MakeCbw (Cbw, 0x28, 10, 1024, TRUE);
+  Cbw[20] = 10;
+  Cbw[23] = 2;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotRead (&Bot, 0, Data, 1024) == EFI_SUCCESS);
+  assert (memcmp (Data, Payload, 400) == 0);
+  for (Index = 0; Index < 200; Index++) {
+    assert (Data[400 + Index] == 0x99);
+  }
+  assert (memcmp (Data + 600, Payload + 600, 424) == 0);
+  /* A failed backend write maps onto a write error; a medium change keeps its
+   * own sense key so the host re-reads the partition table. */
+  memset (Payload, 0x11, 512);
+  mBlockWriteStatus = EFI_DEVICE_ERROR;
+  MakeCbw (Cbw, 0x2a, 10, 512, FALSE);
+  Cbw[23] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotWrite (&Bot, 0, Payload, 512) == EFI_DEVICE_ERROR);
+  assert (Bot.SenseKey == 3 && Bot.Asc == 0x0c);
+  mBlockWriteStatus = EFI_MEDIA_CHANGED;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotWrite (&Bot, 0, Payload, 512) == EFI_MEDIA_CHANGED);
+  assert (Bot.SenseKey == 6 && Bot.Asc == 0x28);
+  mBlockWriteStatus = EFI_SUCCESS;
   /* SYNCHRONIZE CACHE reaches BlockIo->FlushBlocks. */
   MakeCbw (Cbw, 0x35, 10, 0, FALSE);
   assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS && Bot.Status == 0);
@@ -2094,6 +2229,26 @@ STATIC VOID WriteBackendTests (VOID) {
   GblMscMediaClose (&Media);
   /* Closing a writable LUN flushes it. */
   assert (mBlockFlushes == 2);
+
+  /* A failing barrier reports a hardware error and leaves the LUN dirty, so a
+   * host that retries knows the acknowledged write is not committed yet. */
+  ResetMocks ();
+  assert (GblMscMediaOpen ("rw:boot_a", &Media) == EFI_SUCCESS);
+  GblMscBotInitMedia (&Bot, &Media);
+  memset (Payload, 0x3c, 512);
+  MakeCbw (Cbw, 0x2a, 10, 512, FALSE);
+  Cbw[23] = 1;
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (GblMscBotWrite (&Bot, 0, Payload, 512) == EFI_SUCCESS && Bot.Dirty);
+  mBlockFlushStatus = EFI_DEVICE_ERROR;
+  MakeCbw (Cbw, 0x35, 10, 0, FALSE);
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (Bot.Status == 1 && Bot.SenseKey == 4 && Bot.Asc == 0x08 && Bot.Dirty);
+  mBlockFlushStatus = EFI_SUCCESS;
+  MakeCbw (Cbw, 0x35, 10, 0, FALSE);
+  assert (GblMscBotBegin (&Bot, Cbw, 31) == EFI_SUCCESS);
+  assert (Bot.Status == 0 && !Bot.Dirty);
+  GblMscMediaClose (&Media);
 
   /* A writable partition must stay away from the GPT. */
   ResetMocks ();
