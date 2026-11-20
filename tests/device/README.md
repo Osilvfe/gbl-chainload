@@ -74,10 +74,17 @@ probe retries, since the interface can need a moment after an eject.
 | `file` | `oem usb-msc file:<path>` | 512-byte blocks, RO, padded capacity, content hash, INQUIRY type 0, MODE SENSE header/block descriptor/pages, write rejected |
 | `iso` | `oem usb-msc iso:<path>` | 2048-byte blocks, INQUIRY type 5 (CD-ROM), GET CONFIGURATION CD-ROM profile, READ TOC (one data track at LBA 0 plus the lead-out that carries the disc size), MODE SENSE page `0x2a` capabilities, GET EVENT STATUS NOTIFICATION (NEA, media class advertised), content hash, write rejected |
 | `mixed` | `oem usb-msc boot_a,file:<path>` | two LUNs with independent block sizes and models |
-| `ram` | `oem usb-msc ram:` | 512-byte blocks, 1 MiB (2048 sectors), INQUIRY type 0, MODE SENSE pages `01,08,0a,1c` (page `0x2a` refused), and a WRITE probe: a plain build refuses with DATA PROTECT and the content is unchanged; a writable build accepts, shows the bytes on the next read, flushes with SYNCHRONIZE CACHE, and restores the block |
+| `ram` | `oem usb-msc ram:` | 512-byte blocks, 1 MiB (2048 sectors), INQUIRY type 0, MODE SENSE pages `01,08,0a,1c` (page `0x2a` refused), MODE SELECT (current values accepted, `WCE=1`/unknown page refused), and a WRITE probe: a plain build refuses WRITE(6/10/12/16) with DATA PROTECT and the content is unchanged; a writable build accepts all four, shows a 2-block round-trip on the next read, survives SYNCHRONIZE CACHE, and restores the medium exactly as found |
+| `rw` | `oem usb-msc rw:<partition>` | **opt-in, writes a real partition**: exports `rw:$MSC_RW_PARTITION`, checks the LUN reports `WP=0` (a write-capable build honoured `rw:`), then writes and restores only the **last block**, verifying the next read, the barrier and the restore. Skips itself if the LUN is write-protected. Never run with the phone about to lose power |
 
-Every case checks the full page set `01,08,0a,1c` on its LUNs, with `2a`
-added for the optical one.
+Every case checks the full page set `01,08,0a,1c` (with its fixed lengths
+12/10) on its LUNs, `2a` added for the optical one, and MODE SELECT
+acceptance/rejection. The default `--cases` is `file iso mixed ram`; `rw` is
+never in the default and needs `MSC_RW_PARTITION=<name>` set, e.g.
+
+```bash
+MSC_RW_PARTITION=userdata tests/device/msc_selftest.sh run --cases rw
+```
 
 Each case ejects through `START STOP UNIT (LoEj=1)` and waits for
 `getvar gbl-chainload_build` to answer again. `--keep` stops after the export
@@ -95,18 +102,27 @@ problem, not a protocol regression.
 Standalone SG_IO helper used by the self-test and handy on its own:
 
 ```bash
-sudo python3 tests/device/msc_probe.py info      /dev/sdb
-sudo python3 tests/device/msc_probe.py modesense /dev/sdb
-sudo python3 tests/device/msc_probe.py mmc       /dev/sdb
-sudo python3 tests/device/msc_probe.py write     /dev/sdb
-sudo python3 tests/device/msc_probe.py eject     /dev/sdb
+sudo python3 tests/device/msc_probe.py info       /dev/sdb
+sudo python3 tests/device/msc_probe.py modesense  /dev/sdb
+sudo python3 tests/device/msc_probe.py modeselect /dev/sdb
+sudo python3 tests/device/msc_probe.py mmc        /dev/sdb
+sudo python3 tests/device/msc_probe.py write      /dev/sdb 2
+sudo python3 tests/device/msc_probe.py eject      /dev/sdb
 python3 tests/device/msc_probe.py self-test
 ```
 
-`write` targets the last logical block, writes a pattern, reads it back,
-issues SYNCHRONIZE CACHE, then restores the original bytes and flushes again,
-so it is safe on any writable LUN. On a read-only LUN it reports
-`write.status=refused` with the DATA PROTECT sense.
+`write [n]` works on the last `n` blocks (default 1): it first writes each of
+WRITE(6/10/12/16) to the last block to prove every CDB size is handled, then
+does an `n`-block pattern round-trip with WRITE(10), issues SYNCHRONIZE CACHE,
+re-reads to prove the bytes survived the barrier, and finally writes the
+original bytes back and verifies the restore. It is safe on any writable LUN
+because it touches only the tail and restores it; on a read-only LUN every
+WRITE is reported as `write.opN=refused` with `write.status=refused` and the
+DATA PROTECT sense, and nothing changes.
+
+`modeselect` sends MODE SELECT(6)/(10) with a current-value page 0x08 (must be
+accepted), then `WCE=1` and an unknown page (must be `5/0x26`
+INVALID FIELD IN PARAMETER LIST). It changes nothing on the device.
 
 It prints `key=value` lines, so `grep`/`awk` work without extra tooling.
 `info` also reports whether the host device the probe is talking to is

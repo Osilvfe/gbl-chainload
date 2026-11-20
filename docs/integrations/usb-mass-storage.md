@@ -427,19 +427,24 @@ it to `EFI/GBLMSC/selftest.bin`, for devices where no usable file exists yet.
 The GBL Fastboot phase (`run`) exports that file as `file:` and `iso:`,
 verifies logical block size, read-only flag, padded capacity, content hash,
 INQUIRY type, `MODE SENSE` header/block descriptor/pages (the
-`01,08,0a,1c[,2a]` set, including that page `0x2a` exists on the CD-ROM LUN
-and is refused on a direct-access one) and the MMC commands with their
-event-status answer, tries a write on each LUN, and ejects back to Fastboot.
-A `mixed` case exports `boot_a` together with the file LUN, and the reference
-hash comes from the device's own `sha256sum` of the recorded file. A `ram`
-case exports the in-memory LUN and probes `WRITE`: a read-only build must
-refuse it with DATA PROTECT (and leave the content unchanged); a writable
-build must accept it, show the bytes on the next read, flush with SYNCHRONIZE
-CACHE, and leave the medium as it found it. This is the only case that
-exercises the write backend on the device, and it never touches real
-storage. See [tests/device/README.md](../../tests/device/README.md) for the
-options; the offline replay of the script itself is
-`tests/host/105_msc_selftest.sh`.
+`01,08,0a,1c[,2a]` set with the fixed 12/10-byte lengths of pages `0x01` and
+`0x1c`, `0x2a` present on the CD-ROM LUN and refused on a direct-access one),
+`MODE SELECT` (a current-value list accepted, `WCE=1` and an unknown page
+refused `5/0x26`), and the MMC commands with their event-status answer, tries
+a write on each read-only LUN, and ejects back to Fastboot. A `mixed` case
+exports `boot_a` together with the file LUN, and the reference hash comes from
+the device's own `sha256sum` of the recorded file.
+
+A `ram` case exports the in-memory LUN and drives the write backend: a
+read-only build must refuse `WRITE(6/10/12/16)` with DATA PROTECT and change
+nothing; a writable build must accept all four CDB sizes, show a 2-block
+round-trip on the next read, survive SYNCHRONIZE CACHE, and restore the medium
+exactly as found. A `rw` case is the only one that writes real storage: it is
+opt-in (listed only in `--cases` and gated on `MSC_RW_PARTITION=<name>`) and it
+writes and restores just the **last block** of `rw:<name>`, skipping itself
+unless the LUN reports `WP=0`. See
+[tests/device/README.md](../../tests/device/README.md) for the options; the
+offline replay of the script itself is `tests/host/105_msc_selftest.sh`.
 
 ## Host validation
 
