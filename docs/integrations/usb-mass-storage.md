@@ -531,3 +531,26 @@ disk, confirmed it was the boot image, and repeatedly switched between RAM
 and partition media with Fastboot resume. This does not establish write
 rejection for every host, every partition geometry, or other devices; those
 cases still need coordinated stage tests.
+
+## Write-path validation on fairlady
+
+On 2026-11-20 the `msc-rev10-write` EFISP (INQUIRY build marker `0010`) was
+staged with `fastboot stage` + `oem boot-efi` and exercised with
+`tests/device/msc_selftest.sh`. Two results matter:
+
+- `run --cases ram`: the writable RAM LUN enumerated as 2048×512 with
+  `Write Protect is off` (MODE SENSE `3f 00 00 08`), and the write probe
+  accepted WRITE(6/10/12/16), showed a 2-block round-trip on the next read,
+  survived SYNCHRONIZE CACHE, and restored the medium — 23/23 checks. The
+  earlier failure was a hardcoded WP bit in `MODE SENSE`, which made Linux
+  mount even a writable LUN read-only; `ModeSense` now reports WP from
+  `Bot->Writable`.
+- `run --cases rw` with `MSC_RW_PARTITION=logfs`: the exported 8 MiB
+  `logfs` partition (2048×4096) reported `WP=0`, and the probe wrote and
+  restored only its last block, verifying the read-back, barrier and restore
+  — 12/12 checks, back in GBL Fastboot afterwards. `logfs` is the preferred
+  target because it only holds the boot trace (`GblTrace.txt`,
+  `GblChainload_BootN.txt`).
+
+Both runs cover one host and one fairlady unit; other partition geometries and
+hosts still need their own coordinated runs.

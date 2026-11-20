@@ -77,14 +77,21 @@ probe retries, since the interface can need a moment after an eject.
 | `ram` | `oem usb-msc ram:` | 512-byte blocks, 1 MiB (2048 sectors), INQUIRY type 0, MODE SENSE pages `01,08,0a,1c` (page `0x2a` refused), MODE SELECT (current values accepted, `WCE=1`/unknown page refused), and a WRITE probe: a plain build refuses WRITE(6/10/12/16) with DATA PROTECT and the content is unchanged; a writable build accepts all four, shows a 2-block round-trip on the next read, survives SYNCHRONIZE CACHE, and restores the medium exactly as found |
 | `rw` | `oem usb-msc rw:<partition>` | **opt-in, writes a real partition**: exports `rw:$MSC_RW_PARTITION`, checks the LUN reports `WP=0` (a write-capable build honoured `rw:`), then writes and restores only the **last block**, verifying the next read, the barrier and the restore. Skips itself if the LUN is write-protected. Never run with the phone about to lose power |
 
-Every case checks the full page set `01,08,0a,1c` (with its fixed lengths
-12/10) on its LUNs, `2a` added for the optical one, and MODE SELECT
+Every case checks the full page set `01,08,0a,1c` (page-length bytes 10/8)
+on its LUNs, `2a` added for the optical one, and MODE SELECT
 acceptance/rejection. The default `--cases` is `file iso mixed ram`; `rw` is
 never in the default and needs `MSC_RW_PARTITION=<name>` set, e.g.
 
 ```bash
-MSC_RW_PARTITION=userdata tests/device/msc_selftest.sh run --cases rw
+MSC_RW_PARTITION=logfs tests/device/msc_selftest.sh run --cases rw
 ```
+
+`logfs` is the recommended `rw:` target: GBL only writes its boot trace there
+(`GblTrace.txt`, `GblChainload_BootN.txt`), so even a mishandled restore cannot
+affect the Android boot chain. Find the exact GPT label with
+`adb shell 'ls -l /dev/block/by-name'` (or `lsblk`/`sgdisk -p` on an exported
+partition), and `sudo umount /dev/sdX*` first so a desktop automount does not
+hold the FAT while the probe writes the tail block.
 
 Each case ejects through `START STOP UNIT (LoEj=1)` and waits for
 `getvar gbl-chainload_build` to answer again. `--keep` stops after the export
